@@ -1,16 +1,17 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { supabase } from '@/src/lib/supabaseClient';
-import RequireRole from '@/components/RequireRole';
+import { supabase } from '@/src/lib/supabaseClient';   // <-- adjust if your path differs
+import RequireRole from '@/components/RequireRole';     // <-- adjust if your path differs
 
-/** Ya Marhaba brand */
+/** ===== Ya Marhaba brand ===== */
 const BRAND = {
   bg1: '#1A1410', bg2: '#211915', surface: '#2B211C', surfaceAlt: '#241C18',
   border: '#3B2E27', text: '#F5EFE8', textMuted: '#CBB8A0',
   primary: '#6B4226', primaryHover: '#7E4B2B', accent: '#B0825C',
   success: '#22C55E', warn: '#F59E0B', danger: '#EF4444',
 };
-const STORAGE_KEY = 'ya_marhaba_checker_scans_continuous_v1';
+const STORAGE_KEY = 'ya_marhaba_checker_scans_continuous_v2';
+const MOUNT_ID = 'qr-reader';
 
 const Card = ({ children, style }) => (
   <div style={{
@@ -49,6 +50,7 @@ const Chip = ({ color, children }) => (
   </span>
 );
 
+/** ===== Page ===== */
 export default function Checker(){
   const [cams,setCams]=useState([]);
   const [deviceId,setDeviceId]=useState('');
@@ -61,12 +63,22 @@ export default function Checker(){
   const qrRef=useRef(null);
   const manualRef=useRef(null);
 
-  // continuous-mode de-duplication
+  // continuous-mode de-duplication (camera stays ON)
   const lastValRef = useRef('');
   const lastAtRef = useRef(0);
-  const DEDUP_MS = 1200; // ignore same value within this window
+  const DEDUP_MS = 1200;
 
-  // Load persisted table
+  // crash-proof stop guards
+  const stoppingRef = useRef(false);
+
+  // Helpers for safe DOM handling
+  const mountAlive = () => {
+    const el = typeof document !== 'undefined' && document.getElementById(MOUNT_ID);
+    return !!el && !!qrRef.current;
+  };
+  const nextTick2 = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+  /** ---------- Persist table ---------- */
   useEffect(()=>{
     try{
       const raw=localStorage.getItem(STORAGE_KEY);
@@ -85,7 +97,7 @@ export default function Checker(){
     try{ localStorage.setItem(STORAGE_KEY, JSON.stringify({scans})); }catch{}
   },[scans]);
 
-  // Helpers
+  /** ---------- Utilities ---------- */
   const normalizeId=(text)=>{
     try{
       const trimmed=(text||'').trim();
@@ -105,14 +117,14 @@ export default function Checker(){
     }catch{ return 'Guest'; }
   }
 
-  // ---------- Camera listing (with permission prompt) ----------
+  /** ---------- Camera listing ---------- */
   async function listCameras(){
     setErrorMsg('');
     if(typeof navigator==='undefined' || !navigator.mediaDevices){
       setErrorMsg('Camera API not available in this browser.'); return;
     }
     try{
-      // prompt to unlock labels on iOS
+      // prompt once so labels show on iOS
       const s=await navigator.mediaDevices.getUserMedia({video:true,audio:false});
       s.getTracks().forEach(t=>t.stop());
     }catch(e){
@@ -132,7 +144,7 @@ export default function Checker(){
     }
   }
 
-  // ---------- Start camera (continuous scanning; no stop on decode) ----------
+  /** ---------- Start camera (continuous scanning, no stop on decode) ---------- */
   let starting=false;
   async function startCamera(){
     setErrorMsg('');
@@ -141,54 +153,51 @@ export default function Checker(){
     try{
       if(typeof window==='undefined') throw new Error('Not in a browser context.');
       if(!window.isSecureContext) throw new Error('Use HTTPS (Vercel) to access camera.');
-      const mountId='qr-reader';
-      const el=document.getElementById(mountId);
+      const el=document.getElementById(MOUNT_ID);
       if(!el) throw new Error('#qr-reader element not found.');
       if(!navigator.mediaDevices?.getUserMedia) throw new Error('Camera API not supported.');
 
-      // clear previous instance if any (no double clear/stop race because we’re not running)
-      try{ await qrRef.current?.stop(); }catch{}
-      try{ await qrRef.current?.clear(); }catch{}
+      // clear previous instance if any (safely)
+      try { await qrRef.current?.stop(); } catch {}
+      await nextTick2();
+      if (document.getElementById(MOUNT_ID)) {
+        try { await qrRef.current?.clear(); } catch {}
+      }
 
       let Html5Qrcode;
       try{
         const mod=await import('html5-qrcode'); Html5Qrcode=mod.Html5Qrcode;
       }catch(e){ console.error('html5-qrcode import failed',e); throw new Error('Failed to load QR scanner library.'); }
 
-      const qr=new Html5Qrcode(mountId,true); qrRef.current=qr;
+      const qr=new Html5Qrcode(MOUNT_ID,true); qrRef.current=qr;
 
       const tryConfigs = [
         deviceId ? { deviceId: { exact: deviceId } } : null,
         { facingMode: 'environment' },
-        { facingMode: 'user' } // last resort
+        { facingMode: 'user' }
       ].filter(Boolean);
 
       let startedOk=false, lastErr=null;
       for(const cameraConfig of tryConfigs){
         try{
           await qr.start(
-            cameraConfig,
+            cameraConfig,                                  // IMPORTANT: pass config directly
             { fps: 10, qrbox: { width: 280, height: 280 } },
             async (decodedText)=>{
-              // continuous scanning: do NOT stop camera here
+              // continuous scanning: KEEP camera running
               const now = Date.now();
-              if (decodedText === lastValRef.current && (now - lastAtRef.current) < DEDUP_MS) {
-                return; // ignore rapid duplicate of same code
-              }
+              if (decodedText === lastValRef.current && (now - lastAtRef.current) < DEDUP_MS) return;
               lastValRef.current = decodedText;
               lastAtRef.current = now;
               try{
                 await handleDecoded(decodedText);
-                // tiny haptic hint on phones if available
-                if (typeof window !== 'undefined' && window.navigator?.vibrate) {
-                  window.navigator.vibrate(30);
-                }
+                if (navigator?.vibrate) navigator.vibrate(30);
               }catch(e){
                 console.error('decode handler error:', e);
                 setErrorMsg('Scanned, but processing failed.');
               }
             },
-            ()=>{} // onScanFailure: ignore noisy frames
+            ()=>{} // ignore noisy frames
           );
           startedOk=true; break;
         }catch(e){
@@ -207,16 +216,36 @@ export default function Checker(){
     }finally{ starting=false; }
   }
 
-  // ---------- Stop camera (manual pause button) ----------
+  /** ---------- Safe stop (fixes removeChild/play() errors) ---------- */
   async function stopCamera(){
-    try{ await qrRef.current?.stop(); }catch(e){ console.warn('qr.stop issue:', e); }
-    // give the <video> a tick to detach before clearing DOM
-    await new Promise(r => setTimeout(r, 50));
-    try{ await qrRef.current?.clear(); }catch(e){ console.warn('qr.clear issue:', e); }
-    setRunning(false);
+    if (stoppingRef.current) return;
+    stoppingRef.current = true;
+    try{
+      const qr = qrRef.current;
+      if (!qr) { setRunning(false); return; }
+
+      try { await qr.stop(); } catch (e) { console.warn('qr.stop issue:', e); }
+      await nextTick2(); // let media detach
+      if (mountAlive()) {
+        try { await qr.clear(); } catch (e) { console.warn('qr.clear issue:', e); }
+      }
+      setRunning(false);
+    } finally {
+      stoppingRef.current = false;
+    }
   }
 
-  // ---------- Scanning ----------
+  // Cleanup on unmount & when tab goes background
+  useEffect(() => {
+    const onHide = async () => { if (document.hidden) await stopCamera(); };
+    document.addEventListener('visibilitychange', onHide);
+    return () => {
+      document.removeEventListener('visibilitychange', onHide);
+      (async () => { try { await qrRef.current?.stop(); } catch {} qrRef.current = null; })();
+    };
+  }, []);
+
+  /** ---------- Scan handling ---------- */
   async function handleDecoded(text){
     const nowStr=new Date().toLocaleString();
     const id=normalizeId(text);
@@ -237,7 +266,7 @@ export default function Checker(){
     manualRef.current.value='';
   }
 
-  // Toast
+  /** ---------- Toast ---------- */
   function showToast(message,type='success'){
     setToast({message,type});
     setTimeout(()=>setToast(null),1500);
@@ -284,7 +313,7 @@ export default function Checker(){
                   Camera stays on. Each QR is logged below. Repeats in this session show “Already in table”.
                 </p>
                 <div style={{marginTop:8, fontSize:12, color:BRAND.accent, letterSpacing:'0.08em'}}>
-                  UI build: YA-MARHABA continuous v1
+                  UI build: YA-MARHABA continuous v2
                 </div>
               </div>
             </div>
@@ -314,7 +343,7 @@ export default function Checker(){
               </div>
             </div>
 
-            <div id="qr-reader" style={{
+            <div id={MOUNT_ID} style={{
               marginTop:12, border:`1px dashed ${BRAND.accent}`, borderRadius:16,
               minHeight:280, display:'grid', placeItems:'center', background:BRAND.surfaceAlt
             }}>
