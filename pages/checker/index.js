@@ -7,9 +7,9 @@ export default function Checker() {
   const [user, setUser] = useState(null);
   const [result, setResult] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
-  const [cams, setCams] = useState([]);          // list of cameras
+  const [cams, setCams] = useState([]);          // available cameras
   const [deviceId, setDeviceId] = useState('');  // chosen camera
-  const [running, setRunning] = useState(false); // is scanner running?
+  const [running, setRunning] = useState(false); // is scanner running
   const qrRef = useRef(null);                    // Html5Qrcode instance
   const manualRef = useRef(null);
 
@@ -17,15 +17,14 @@ export default function Checker() {
     supabase.auth.getUser().then(({ data }) => setUser(data.user));
   }, []);
 
-  // Ask permission & enumerate cameras (iOS often requires a user gesture)
+  // Ask permission & enumerate cameras (iOS needs a user gesture)
   async function listCameras() {
     try {
       const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       s.getTracks().forEach(t => t.stop());
     } catch (_) {
-      // ignore; just to trigger permission prompt so labels are visible
+      // ignored; mainly to unlock camera labels on iOS
     }
-
     const devices = await navigator.mediaDevices.enumerateDevices();
     const vs = devices.filter(d => d.kind === 'videoinput');
     setCams(vs);
@@ -46,11 +45,10 @@ export default function Checker() {
       const el = document.getElementById(mountId);
       if (!el) return;
 
-      // cleanup any previous session
+      // cleanup previous session
       try { await qrRef.current?.stop(); } catch {}
       try { await qrRef.current?.clear(); } catch {}
 
-      // ensure we have a chosen device
       if (!deviceId) await listCameras();
       const chosen = deviceId || cams[0]?.deviceId;
       if (!chosen) {
@@ -86,7 +84,7 @@ export default function Checker() {
     setRunning(false);
   }
 
-  // ✅ Correct “Already used” behavior (atomic update + row count)
+  // Robust check-in: read → decide → update → verify (proper "Already used")
   async function handleDecoded(text) {
     try {
       const url = new URL(text);
@@ -95,8 +93,33 @@ export default function Checker() {
       const id = parts[1] || parts[0];
       if (!id) { setResult('Unknown link'); return; }
 
-      // Attempt to check-in ONLY if currently PENDING; return the updated row(s)
-      const { data: updated, error } = await supabase
+      // 1) Read current status first
+      const { data: invite, error: readErr } = await supabase
+        .from('invites')
+        .select('id, guest_name, status')
+        .eq('id', id)
+        .single();
+
+      if (readErr || !invite) {
+        setResult('Invite not found');
+        return;
+      }
+
+      const name = invite.guest_name || 'Guest';
+      const status = (invite.status || '').toUpperCase();
+
+      if (status === 'CHECKED_IN') {
+        setResult(`Already used: ${name}`);
+        return;
+      }
+      if (status !== 'PENDING') {
+        // Customize other statuses as needed (e.g., BLOCKED, CANCELED)
+        setResult(`Cannot check in: status is ${invite.status}`);
+        return;
+      }
+
+      // 2) Try to flip PENDING -> CHECKED_IN (guarded by status for atomicity)
+      const { data: updated, error: updErr } = await supabase
         .from('invites')
         .update({
           status: 'CHECKED_IN',
@@ -107,35 +130,34 @@ export default function Checker() {
         .eq('status', 'PENDING')
         .select('id, guest_name, status');
 
-      if (error) {
-        setResult('Failed: ' + error.message);
+      if (updErr) {
+        setResult('Failed to check-in: ' + updErr.message); // RLS/policy errors will show here
         return;
       }
 
-      // If no rows updated → it wasn’t PENDING → fetch current status to decide what to show
       if (!updated || updated.length === 0) {
-        const { data: existing, error: fetchErr } = await supabase
+        // Another device may have checked-in just now → re-read
+        const { data: after, error: rereadErr } = await supabase
           .from('invites')
           .select('guest_name, status')
           .eq('id', id)
           .single();
 
-        if (fetchErr || !existing) {
-          setResult('Invite not found');
+        if (rereadErr || !after) {
+          setResult('Invite not found after update');
           return;
         }
-
-        if (existing.status === 'CHECKED_IN') {
-          setResult(`Already used: ${existing.guest_name}`);
+        if ((after.status || '').toUpperCase() === 'CHECKED_IN') {
+          setResult(`Already used: ${after.guest_name || 'Guest'}`);
         } else {
-          setResult(`Cannot check in: status is ${existing.status}`);
+          setResult(`Cannot check in: status is ${after.status}`);
         }
         return;
       }
 
-      // Success path: we flipped PENDING → CHECKED_IN
+      // 3) Success
       const row = updated[0];
-      setResult(`Checked in: ${row.guest_name}`);
+      setResult(`Checked in: ${row.guest_name || 'Guest'}`);
     } catch (_e) {
       setResult('Invalid QR content');
     }
