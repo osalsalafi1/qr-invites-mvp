@@ -12,7 +12,8 @@ export default function Checker() {
   const [deviceId, setDeviceId] = useState('');
   const [running, setRunning] = useState(false);
   const [scans, setScans] = useState([]);
-  const [lastStatus, setLastStatus] = useState(null); // For green/red message
+  const [lastStatus, setLastStatus] = useState(null); 
+  const [lastTime, setLastTime] = useState(null); // for already scanned time
   const scansRef = useRef(scans);
   const seenRef = useRef(new Set());
   const qrRef = useRef(null);
@@ -75,6 +76,7 @@ export default function Checker() {
   async function startCamera() {
     setErrorMsg('');
     setLastStatus(null);
+    setLastTime(null);
     try {
       const mod = await import('html5-qrcode');
       const { Html5Qrcode } = mod;
@@ -130,12 +132,14 @@ export default function Checker() {
       return;
     }
 
-    const already = seenRef.current.has(id) || scansRef.current.some(r => r.id === id);
+    const existing = scansRef.current.find(r => r.id === id);
+    const already = !!existing;
     const name = await fetchNameIfPossible(id);
 
     setScans(prev => [{ id, name, time: now, status: already ? 'ALREADY' : 'OK' }, ...prev]);
     seenRef.current.add(id);
     setLastStatus(already ? 'ALREADY' : 'OK');
+    if (already) setLastTime(existing.time);
   }
 
   async function fetchNameIfPossible(id) {
@@ -162,19 +166,8 @@ export default function Checker() {
   function Dot({ status }) {
     const ok = status === 'OK';
     const already = status === 'ALREADY';
-    const invalid = status === 'INVALID';
-    const color = ok ? '#16a34a' : already ? '#f59e0b' : invalid ? '#ef4444' : '#6b7280';
-    const label =
-      ok ? 'First in table' :
-      already ? 'Already in table' :
-      invalid ? 'Invalid' :
-      status;
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span style={{ width: 10, height: 10, borderRadius: 999, background: color }} />
-        <span>{label}</span>
-      </div>
-    );
+    const color = ok ? '#16a34a' : already ? '#f59e0b' : '#6b7280';
+    return <span style={{ display: 'inline-block', width: 12, height: 12, borderRadius: '50%', background: color }} />;
   }
 
   return (
@@ -217,7 +210,9 @@ export default function Checker() {
           <div style={{ background: '#2E7D32', padding: 12, marginTop: 10, borderRadius: 6, textAlign: 'center' }}>✅ First Time Scan - Welcome!</div>
         )}
         {lastStatus === 'ALREADY' && (
-          <div style={{ background: '#C62828', padding: 12, marginTop: 10, borderRadius: 6, textAlign: 'center' }}>❌ Already Scanned</div>
+          <div style={{ background: '#C62828', padding: 12, marginTop: 10, borderRadius: 6, textAlign: 'center' }}>
+            ❌ Already Scanned {lastTime ? `(at ${lastTime})` : ''}
+          </div>
         )}
 
         {/* Error */}
@@ -245,20 +240,18 @@ export default function Checker() {
                   <th style={{ padding: 8 }}>Guest</th>
                   <th style={{ padding: 8 }}>Time</th>
                   <th style={{ padding: 8 }}>Status</th>
-                  <th style={{ padding: 8 }}>ID</th>
                 </tr>
               </thead>
               <tbody>
                 {scans.length === 0 ? (
-                  <tr><td colSpan={5} style={{ padding: 12, textAlign: 'center', color: '#BCAAA4' }}>No scans yet</td></tr>
+                  <tr><td colSpan={4} style={{ padding: 12, textAlign: 'center', color: '#BCAAA4' }}>No scans yet</td></tr>
                 ) : (
                   scans.map((r, idx) => (
                     <tr key={`${r.id}-${idx}`} style={{ borderBottom: '1px solid #6D4C41' }}>
                       <td style={{ padding: 8 }}>{scans.length - idx}</td>
                       <td style={{ padding: 8 }}>{r.name}</td>
                       <td style={{ padding: 8 }}>{r.time}</td>
-                      <td style={{ padding: 8 }}><Dot status={r.status} /></td>
-                      <td style={{ padding: 8, fontFamily: 'monospace' }}>{r.id}</td>
+                      <td style={{ padding: 8, textAlign: 'center' }}><Dot status={r.status} /></td>
                     </tr>
                   ))
                 )}
