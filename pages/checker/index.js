@@ -5,11 +5,11 @@ import RequireRole from '@/components/RequireRole';
 
 export default function Checker() {
   const [user, setUser] = useState(null);
-  const [result, setResult] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [cams, setCams] = useState([]);          // available cameras
   const [deviceId, setDeviceId] = useState('');  // chosen camera
   const [running, setRunning] = useState(false); // is scanner running
+  const [scans, setScans] = useState([]);        // table rows: {name, time, status}
   const qrRef = useRef(null);                    // Html5Qrcode instance
   const manualRef = useRef(null);
 
@@ -22,9 +22,7 @@ export default function Checker() {
     try {
       const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       s.getTracks().forEach(t => t.stop());
-    } catch (_) {
-      // ignored; mainly to unlock camera labels on iOS
-    }
+    } catch (_) { /* just to unlock labels / permission prompt */ }
     const devices = await navigator.mediaDevices.enumerateDevices();
     const vs = devices.filter(d => d.kind === 'videoinput');
     setCams(vs);
@@ -36,7 +34,6 @@ export default function Checker() {
 
   async function startCamera() {
     setErrorMsg('');
-    setResult('');
     try {
       const mod = await import('html5-qrcode');
       const { Html5Qrcode } = mod;
@@ -63,7 +60,8 @@ export default function Checker() {
         { deviceId: { exact: chosen } },
         { fps: 10, qrbox: { width: 260, height: 260 } },
         async (decodedText) => {
-          setResult('Checking...');
+          // Immediately stop camera on first decode
+          await stopCamera();
           await handleDecoded(decodedText);
         },
         () => {} // ignore continuous scan failures
@@ -84,14 +82,18 @@ export default function Checker() {
     setRunning(false);
   }
 
-  // Robust check-in: read → decide → update → verify (proper "Already used")
+  // Read → decide → update → verify → append to table and color (green/red)
   async function handleDecoded(text) {
+    const now = new Date().toLocaleString();
     try {
       const url = new URL(text);
       const parts = url.pathname.split('/').filter(Boolean);
       // Expect /i/{inviteId}
       const id = parts[1] || parts[0];
-      if (!id) { setResult('Unknown link'); return; }
+      if (!id) {
+        setScans(prev => [{ name: 'Unknown', time: now, status: 'INVALID' }, ...prev]);
+        return;
+      }
 
       // 1) Read current status first
       const { data: invite, error: readErr } = await supabase
@@ -101,7 +103,7 @@ export default function Checker() {
         .single();
 
       if (readErr || !invite) {
-        setResult('Invite not found');
+        setScans(prev => [{ name: 'Not found', time: now, status: 'NOT_FOUND' }, ...prev]);
         return;
       }
 
@@ -109,16 +111,15 @@ export default function Checker() {
       const status = (invite.status || '').toUpperCase();
 
       if (status === 'CHECKED_IN') {
-        setResult(`Already used: ${name}`);
+        setScans(prev => [{ name, time: now, status: 'ALREADY' }, ...prev]);
         return;
       }
       if (status !== 'PENDING') {
-        // Customize other statuses as needed (e.g., BLOCKED, CANCELED)
-        setResult(`Cannot check in: status is ${invite.status}`);
+        setScans(prev => [{ name, time: now, status: `BLOCKED:${invite.status}` }, ...prev]);
         return;
       }
 
-      // 2) Try to flip PENDING -> CHECKED_IN (guarded by status for atomicity)
+      // 2) Try to flip PENDING -> CHECKED_IN (atomic)
       const { data: updated, error: updErr } = await supabase
         .from('invites')
         .update({
@@ -128,38 +129,32 @@ export default function Checker() {
         })
         .eq('id', id)
         .eq('status', 'PENDING')
-        .select('id, guest_name, status');
+        .select('id');
 
       if (updErr) {
-        setResult('Failed to check-in: ' + updErr.message); // RLS/policy errors will show here
+        setScans(prev => [{ name, time: now, status: `ERROR:${updErr.message}` }, ...prev]);
         return;
       }
 
       if (!updated || updated.length === 0) {
-        // Another device may have checked-in just now → re-read
-        const { data: after, error: rereadErr } = await supabase
+        // Re-read to confirm final state
+        const { data: after } = await supabase
           .from('invites')
           .select('guest_name, status')
           .eq('id', id)
           .single();
-
-        if (rereadErr || !after) {
-          setResult('Invite not found after update');
-          return;
-        }
-        if ((after.status || '').toUpperCase() === 'CHECKED_IN') {
-          setResult(`Already used: ${after.guest_name || 'Guest'}`);
+        if ((after?.status || '').toUpperCase() === 'CHECKED_IN') {
+          setScans(prev => [{ name: after?.guest_name || name, time: now, status: 'ALREADY' }, ...prev]);
         } else {
-          setResult(`Cannot check in: status is ${after.status}`);
+          setScans(prev => [{ name: after?.guest_name || name, time: now, status: `BLOCKED:${after?.status}` }, ...prev]);
         }
         return;
       }
 
       // 3) Success
-      const row = updated[0];
-      setResult(`Checked in: ${row.guest_name || 'Guest'}`);
+      setScans(prev => [{ name, time: now, status: 'OK' }, ...prev]);
     } catch (_e) {
-      setResult('Invalid QR content');
+      setScans(prev => [{ name: 'Invalid QR', time: now, status: 'INVALID' }, ...prev]);
     }
   }
 
@@ -167,16 +162,36 @@ export default function Checker() {
     const id = manualRef.current?.value?.trim();
     if (!id) return;
     const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    await stopCamera();
     await handleDecoded(`${origin}/i/${id}`);
+  }
+
+  // Small dot renderer
+  function Dot({ status }) {
+    const ok = status === 'OK';
+    const already = status === 'ALREADY';
+    const invalid = status === 'INVALID' || status?.startsWith('ERROR') || status?.startsWith('BLOCKED') || status === 'NOT_FOUND';
+    const color = ok ? '#16a34a' : already ? '#f59e0b' : invalid ? '#ef4444' : '#6b7280';
+    const label =
+      ok ? 'First check-in' :
+      already ? 'Already used' :
+      invalid ? (status === 'NOT_FOUND' ? 'Not found' : 'Invalid / Blocked') :
+      status;
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ width: 10, height: 10, borderRadius: 999, background: color }} />
+        <span>{label}</span>
+      </div>
+    );
   }
 
   return (
     <RequireRole role={['checker','admin']}>
-      <div style={{ padding: 16, fontFamily: 'sans-serif' }}>
+      <div style={{ padding: 16, fontFamily: 'sans-serif', maxWidth: 820, margin: '0 auto' }}>
         <h2>Scanner</h2>
 
         {/* Camera controls */}
-        <div style={{ marginBottom: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {!cams.length && (
             <button onClick={listCameras}>Find cameras</button>
           )}
@@ -185,7 +200,7 @@ export default function Checker() {
               <select
                 value={deviceId}
                 onChange={e => setDeviceId(e.target.value)}
-                style={{ minWidth: 200 }}
+                style={{ minWidth: 220 }}
               >
                 {cams.map(c => (
                   <option key={c.deviceId} value={c.deviceId}>
@@ -198,14 +213,14 @@ export default function Checker() {
               ) : (
                 <button onClick={stopCamera}>Stop camera</button>
               )}
+              <button onClick={() => setScans([])} style={{ marginLeft: 'auto' }}>
+                Clear table
+              </button>
             </>
           )}
         </div>
 
-        <div
-          id="qr-reader"
-          style={{ width: 320, maxWidth: '100%', minHeight: 260, background: '#f7f7f7' }}
-        />
+        <div id="qr-reader" style={{ width: 360, maxWidth: '100%', minHeight: 260, background: '#f7f7f7' }} />
 
         {errorMsg && (
           <div style={{ marginTop: 10, padding: 10, background: '#ffecec', color: '#a00', border: '1px solid #f5c2c2' }}>
@@ -213,15 +228,49 @@ export default function Checker() {
           </div>
         )}
 
-        <p style={{ marginTop: 12, fontSize: 16 }}>{result}</p>
-        <hr />
-        <h4>Manual input (invite UUID)</h4>
-        <input
-          ref={manualRef}
-          placeholder="550e8400-e29b-41d4-a716-446655440000"
-          style={{ width: 320 }}
-        />
-        <button onClick={manualCheckin} style={{ marginInlineStart: 8 }}>Check-in</button>
+        {/* Manual input */}
+        <div style={{ marginTop: 14 }}>
+          <h4>Manual input (invite UUID)</h4>
+          <input
+            ref={manualRef}
+            placeholder="550e8400-e29b-41d4-a716-446655440000"
+            style={{ width: 360, maxWidth: '100%' }}
+          />
+          <button onClick={manualCheckin} style={{ marginInlineStart: 8 }}>
+            Check-in
+          </button>
+        </div>
+
+        {/* Scan results table */}
+        <div style={{ marginTop: 20 }}>
+          <h3>Scans</h3>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ textAlign: 'left', borderBottom: '1px solid #e5e7eb' }}>
+                  <th style={{ padding: '8px 6px' }}>#</th>
+                  <th style={{ padding: '8px 6px' }}>Guest</th>
+                  <th style={{ padding: '8px 6px' }}>Time</th>
+                  <th style={{ padding: '8px 6px' }}>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scans.length === 0 ? (
+                  <tr><td colSpan={4} style={{ padding: 12, color: '#6b7280' }}>No scans yet</td></tr>
+                ) : (
+                  scans.map((r, idx) => (
+                    <tr key={idx} style={{ borderBottom: '1px solid #f3f4f6' }}>
+                      <td style={{ padding: '8px 6px' }}>{scans.length - idx}</td>
+                      <td style={{ padding: '8px 6px' }}>{r.name}</td>
+                      <td style={{ padding: '8px 6px' }}>{r.time}</td>
+                      <td style={{ padding: '8px 6px' }}><Dot status={r.status} /></td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </RequireRole>
   );
