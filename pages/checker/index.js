@@ -1,237 +1,325 @@
 'use client';
-import { useState, useRef } from 'react';
-import dynamic from 'next/dynamic';
+import { useEffect, useRef, useState } from 'react';
 import { supabase } from '@/src/lib/supabaseClient';
-import dayjs from 'dayjs';
+import RequireRole from '@/components/RequireRole';
 
-const QrReader = dynamic(() => import('react-qr-reader'), { ssr: false });
-
-const BRAND = {
-  bg: '#3E2723',
-  card: '#4E342E',
-  accent: '#8D6E63',
-  primary: '#6D4C41',
-  danger: '#B71C1C',
-  text: '#FFF',
-  textMuted: '#D7CCC8',
-  border: '#6D4C41',
-  surface: '#5D4037',
-};
+const STORAGE_KEY = 'qr_checker_scans_v1';
+const LANG_KEY = 'qr_checker_language';
 
 export default function Checker() {
-  const [scanning, setScanning] = useState(false);
-  const [invites, setInvites] = useState([]);
-  const [message, setMessage] = useState(null);
-  const [messageType, setMessageType] = useState(null); // 'success' or 'error'
-  const scannedCodesRef = useRef(new Set());
+  const [user, setUser] = useState(null);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [cams, setCams] = useState([]);
+  const [deviceId, setDeviceId] = useState('');
+  const [running, setRunning] = useState(false);
+  const [scans, setScans] = useState([]);
+  const [lastStatus, setLastStatus] = useState(null); 
+  const [lastTime, setLastTime] = useState(null);
+  const [language, setLanguage] = useState('en'); // NEW
 
-  // Counter for unique first-time scans
-  const [guestCount, setGuestCount] = useState(0);
+  const scansRef = useRef(scans);
+  const seenRef = useRef(new Set());
+  const qrRef = useRef(null);
+  const manualRef = useRef(null);
 
-  async function handleScan(data) {
-    if (!data) return;
+  const translations = {
+    en: {
+      brand: "Ya Mar7aba - Scanner",
+      findCams: "Find cameras",
+      startScanner: "▶ Start Scanner",
+      stopScanner: "■ Stop Scanner",
+      firstScan: "✅ First Time Scan - Welcome!",
+      alreadyScan: "❌ Already Scanned",
+      cameraError: "Camera error:",
+      manualAdd: "Manual add",
+      manualPlaceholder: "UUID or QR URL",
+      add: "Add",
+      scansTitle: "Scans (this device)",
+      noScans: "No scans yet",
+      guest: "Guest",
+      time: "Time",
+      status: "Status",
+      langSwitch: "عربي"
+    },
+    ar: {
+      brand: "يا مرحبا - الماسح",
+      findCams: "البحث عن الكاميرات",
+      startScanner: "▶ بدء الماسح",
+      stopScanner: "■ إيقاف الماسح",
+      firstScan: "✅ أول مرة - أهلاً وسهلاً!",
+      alreadyScan: "❌ تم المسح مسبقًا",
+      cameraError: "خطأ في الكاميرا:",
+      manualAdd: "إضافة يدويًا",
+      manualPlaceholder: "المعرف أو رابط QR",
+      add: "إضافة",
+      scansTitle: "المسحات (هذا الجهاز)",
+      noScans: "لا توجد مسحات حتى الآن",
+      guest: "الضيف",
+      time: "الوقت",
+      status: "الحالة",
+      langSwitch: "English"
+    }
+  };
+
+  useEffect(() => {
+    const storedLang = localStorage.getItem(LANG_KEY);
+    if (storedLang) setLanguage(storedLang);
 
     try {
-      const code = extractCodeFromQR(data);
-      if (!code) {
-        setMessage('Invalid QR format!');
-        setMessageType('error');
-        return;
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed?.scans)) {
+          setScans(parsed.scans);
+          scansRef.current = parsed.scans;
+          seenRef.current = new Set((parsed.scans || []).map(r => r.id));
+        }
       }
+    } catch {}
+  }, []);
 
-      // Check if already scanned in current session
-      if (scannedCodesRef.current.has(code)) {
-        const existing = invites.find((i) => i.code === code);
-        setMessage(`❌ Already scanned at ${existing?.time || ''}`);
-        setMessageType('error');
-        return;
-      }
+  useEffect(() => {
+    scansRef.current = scans;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ scans }));
+    } catch {}
+  }, [scans]);
 
-      // Lookup in DB
-      const { data: invite, error } = await supabase
-        .from('invites')
-        .select('id,guest_name,code,status,created_at')
-        .eq('code', code)
-        .maybeSingle();
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setUser(data.user)).catch(() => {});
+  }, []);
 
-      if (error) throw error;
-
-      if (!invite) {
-        setMessage('❌ Invalid guest code!');
-        setMessageType('error');
-        return;
-      }
-
-      // If it's first check-in, update DB and UI
-      const alreadyChecked = invite.status === 'CHECKED_IN';
-      const now = dayjs().format('YYYY-MM-DD HH:mm:ss');
-
-      if (!alreadyChecked) {
-        await supabase
-          .from('invites')
-          .update({ status: 'CHECKED_IN' })
-          .eq('id', invite.id);
-      }
-
-      scannedCodesRef.current.add(code);
-      setInvites((prev) => [
-        ...prev,
-        { name: invite.guest_name, code: code, time: now, status: alreadyChecked ? 'duplicate' : 'first' },
-      ]);
-
-      if (alreadyChecked) {
-        setMessage(`❌ Already scanned before at ${now}`);
-        setMessageType('error');
-      } else {
-        setMessage(`✅ Welcome ${invite.guest_name}`);
-        setMessageType('success');
-        setGuestCount((count) => count + 1); // Count only first-time scans
-      }
-    } catch (err) {
-      console.error(err);
-      setMessage('Error processing QR code.');
-      setMessageType('error');
-    }
+  function toggleLanguage() {
+    const newLang = language === 'en' ? 'ar' : 'en';
+    setLanguage(newLang);
+    localStorage.setItem(LANG_KEY, newLang);
   }
 
-  function extractCodeFromQR(data) {
+  function normalizeId(text) {
     try {
-      // Try to parse if it's a URL
-      if (data.startsWith('http')) {
-        const url = new URL(data);
-        return url.pathname.split('/').pop();
-      }
-      return data.trim();
+      const trimmed = (text || '').trim();
+      const url = new URL(trimmed);
+      const parts = url.pathname.split('/').filter(Boolean);
+      let id = '';
+      const iIndex = parts.findIndex(x => x.toLowerCase() === 'i');
+      if (iIndex >= 0 && parts[iIndex + 1]) id = parts[iIndex + 1];
+      else id = parts[parts.length - 1] || '';
+      return decodeURIComponent(id).trim().toLowerCase();
     } catch {
-      return null;
+      return (text || '').trim().toLowerCase();
     }
   }
 
-  function handleError(err) {
-    console.error(err);
-    setMessage('Camera error.');
-    setMessageType('error');
+  async function listCameras() {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: true });
+      s.getTracks().forEach(t => t.stop());
+    } catch {}
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const vs = devices.filter(d => d.kind === 'videoinput');
+    setCams(vs);
+    if (vs.length && !deviceId) {
+      const back = vs.find(v => /back|rear|environment/i.test(v.label));
+      setDeviceId((back || vs[0]).deviceId);
+    }
   }
+
+  async function startCamera() {
+    setErrorMsg('');
+    setLastStatus(null);
+    setLastTime(null);
+    try {
+      const mod = await import('html5-qrcode');
+      const { Html5Qrcode } = mod;
+      const mountId = 'qr-reader';
+      const el = document.getElementById(mountId);
+      if (!el) return;
+
+      try { await qrRef.current?.stop(); } catch {}
+      try { await qrRef.current?.clear(); } catch {}
+
+      if (!deviceId) await listCameras();
+      const chosen = deviceId || cams[0]?.deviceId;
+      if (!chosen) {
+        setErrorMsg('No camera available. Enable camera permission and try again.');
+        return;
+      }
+
+      const qr = new Html5Qrcode(mountId, true);
+      qrRef.current = qr;
+
+      await qr.start(
+        { deviceId: { exact: chosen } },
+        { fps: 10, qrbox: { width: 260, height: 260 } },
+        async (decodedText) => {
+          await stopCamera();
+          await handleDecoded(decodedText);
+        }
+      );
+      setRunning(true);
+    } catch (e) {
+      let msg = e?.message || e?.name || String(e);
+      if (/Permission|NotAllowed/i.test(msg)) msg += ' — allow camera in browser/site settings.';
+      if (/secure context|getUserMedia/i.test(msg)) msg += ' — must use HTTPS (Vercel is OK).';
+      setErrorMsg(msg);
+      setRunning(false);
+    }
+  }
+
+  async function stopCamera() {
+    try { await qrRef.current?.stop(); } catch {}
+    try { await qrRef.current?.clear(); } catch {}
+    setRunning(false);
+  }
+
+  async function handleDecoded(text) {
+    const now = new Date().toLocaleString();
+    const id = normalizeId(text);
+
+    if (!id) {
+      setScans(prev => [{ id: '-', name: 'Invalid QR', time: now, status: 'INVALID' }, ...prev]);
+      setLastStatus('INVALID');
+      return;
+    }
+
+    const existing = scansRef.current.find(r => r.id === id);
+    const already = !!existing;
+    const name = await fetchNameIfPossible(id);
+
+    setScans(prev => [{ id, name, time: now, status: already ? 'ALREADY' : 'OK' }, ...prev]);
+    seenRef.current.add(id);
+    setLastStatus(already ? 'ALREADY' : 'OK');
+    if (already) setLastTime(existing.time);
+  }
+
+  async function fetchNameIfPossible(id) {
+    try {
+      const { data } = await supabase
+        .from('invites')
+        .select('guest_name')
+        .eq('id', id)
+        .single();
+      return data?.guest_name || 'Guest';
+    } catch {
+      return 'Guest';
+    }
+  }
+
+  async function manualAdd() {
+    const val = manualRef.current?.value?.trim();
+    if (!val) return;
+    await stopCamera();
+    await handleDecoded(val);
+    manualRef.current.value = '';
+  }
+
+  function Dot({ status }) {
+    const ok = status === 'OK';
+    const already = status === 'ALREADY';
+    const color = ok ? '#16a34a' : already ? '#f59e0b' : '#6b7280';
+    return <span style={{ display: 'inline-block', width: 12, height: 12, borderRadius: '50%', background: color }} />;
+  }
+
+  const t = translations[language];
 
   return (
-    <div style={{ background: BRAND.bg, minHeight: '100vh', padding: 20, color: BRAND.text }}>
-      <h1 style={{ textAlign: 'center', marginBottom: 20 }}>Ya Mar7aba – Checker</h1>
-
-      {/* Counter */}
-      <div style={{ textAlign: 'center', marginBottom: 10 }}>
-        <h2 style={{ margin: 0 }}>Guests in hall: {guestCount}</h2>
-        <p style={{ color: BRAND.textMuted, margin: 0, fontSize: 14 }}>
-          Only first-time scans are counted
-        </p>
-      </div>
-
-      {/* Start scanning button */}
-      {!scanning && (
-        <div style={{ textAlign: 'center', marginBottom: 20 }}>
-          <button
-            style={{
-              background: BRAND.accent,
-              color: '#fff',
-              border: 'none',
-              padding: '16px 28px',
-              fontSize: 18,
-              borderRadius: 12,
-              cursor: 'pointer',
-            }}
-            onClick={() => setScanning(true)}
-          >
-            Start Scanning
+    <RequireRole role={['checker','admin']}>
+      <div style={{ padding: 16, fontFamily: 'sans-serif', maxWidth: 820, margin: '0 auto', background: '#3E2723', color: '#fff', borderRadius: 8 }}>
+        
+        {/* Language Switch */}
+        <div style={{ textAlign: 'right', marginBottom: 10 }}>
+          <button onClick={toggleLanguage} style={{ background: '#8D6E63', color: '#fff', border: 'none', borderRadius: 4, padding: '6px 12px' }}>
+            {t.langSwitch}
           </button>
         </div>
-      )}
 
-      {/* QR Scanner */}
-      {scanning && (
-        <div style={{ maxWidth: 400, margin: '0 auto', marginBottom: 20 }}>
-          <QrReader
-            delay={300}
-            onError={handleError}
-            onScan={handleScan}
-            style={{ width: '100%' }}
-          />
-          <div style={{ textAlign: 'center', marginTop: 10 }}>
-            <button
-              onClick={() => setScanning(false)}
-              style={{
-                background: BRAND.danger,
-                color: '#fff',
-                border: 'none',
-                padding: '10px 18px',
-                fontSize: 14,
-                borderRadius: 8,
-                cursor: 'pointer',
-              }}
-            >
-              Stop Camera
-            </button>
+        <h1 style={{ textAlign: 'center', fontSize: 28, marginBottom: 20 }}>{t.brand}</h1>
+
+        {/* Start/Stop Camera */}
+        <div style={{ marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
+          {!cams.length && (
+            <button onClick={listCameras} style={{ padding: '12px 20px', fontSize: 18, background: '#8D6E63', color: '#fff', border: 'none', borderRadius: 6 }}>{t.findCams}</button>
+          )}
+          {cams.length > 0 && (
+            <>
+              <select
+                value={deviceId}
+                onChange={e => setDeviceId(e.target.value)}
+                style={{ minWidth: 220, padding: 8, borderRadius: 6 }}
+              >
+                {cams.map(c => (
+                  <option key={c.deviceId} value={c.deviceId}>
+                    {c.label || 'Camera'}
+                  </option>
+                ))}
+              </select>
+              {!running ? (
+                <button onClick={startCamera} style={{ padding: '14px 28px', fontSize: 20, background: '#6D4C41', color: '#fff', border: 'none', borderRadius: 8 }}>{t.startScanner}</button>
+              ) : (
+                <button onClick={stopCamera} style={{ padding: '14px 28px', fontSize: 20, background: '#B71C1C', color: '#fff', border: 'none', borderRadius: 8 }}>{t.stopScanner}</button>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Scanner Area */}
+        <div id="qr-reader" style={{ width: 360, maxWidth: '100%', minHeight: 260, background: '#5D4037', margin: '0 auto', borderRadius: 8 }} />
+
+        {/* Status Message */}
+        {lastStatus === 'OK' && (
+          <div style={{ background: '#2E7D32', padding: 12, marginTop: 10, borderRadius: 6, textAlign: 'center' }}>{t.firstScan}</div>
+        )}
+        {lastStatus === 'ALREADY' && (
+          <div style={{ background: '#C62828', padding: 12, marginTop: 10, borderRadius: 6, textAlign: 'center' }}>
+            {t.alreadyScan} {lastTime ? `(${lastTime})` : ''}
+          </div>
+        )}
+
+        {/* Error */}
+        {errorMsg && (
+          <div style={{ marginTop: 10, padding: 10, background: '#FFCDD2', color: '#B71C1C', borderRadius: 6 }}>
+            <b>{t.cameraError}</b> {errorMsg}
+          </div>
+        )}
+
+        {/* Manual input */}
+        <div style={{ marginTop: 14 }}>
+          <h4>{t.manualAdd}</h4>
+          <input ref={manualRef} placeholder={t.manualPlaceholder} style={{ width: 260, padding: 8, borderRadius: 6 }} />
+          <button onClick={manualAdd} style={{ marginInlineStart: 8, padding: '8px 14px', background: '#8D6E63', color: '#fff', border: 'none', borderRadius: 6 }}>{t.add}</button>
+        </div>
+
+        {/* Table */}
+        <div style={{ marginTop: 20 }}>
+          <h3>{t.scansTitle}</h3>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', background: '#4E342E', borderRadius: 8, overflow: 'hidden' }}>
+              <thead style={{ background: '#3E2723' }}>
+                <tr>
+                  <th style={{ padding: 8 }}>#</th>
+                  <th style={{ padding: 8 }}>{t.guest}</th>
+                  <th style={{ padding: 8 }}>{t.time}</th>
+                  <th style={{ padding: 8 }}>{t.status}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scans.length === 0 ? (
+                  <tr><td colSpan={4} style={{ padding: 12, textAlign: 'center', color: '#BCAAA4' }}>{t.noScans}</td></tr>
+                ) : (
+                  scans.map((r, idx) => (
+                    <tr key={`${r.id}-${idx}`} style={{ borderBottom: '1px solid #6D4C41' }}>
+                      <td style={{ padding: 8 }}>{scans.length - idx}</td>
+                      <td style={{ padding: 8 }}>{r.name}</td>
+                      <td style={{ padding: 8 }}>{r.time}</td>
+                      <td style={{ padding: 8, textAlign: 'center' }}><Dot status={r.status} /></td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
-      )}
-
-      {/* Message */}
-      {message && (
-        <div
-          style={{
-            textAlign: 'center',
-            padding: '10px 14px',
-            borderRadius: 8,
-            background: messageType === 'success' ? '#2E7D32' : '#C62828',
-            marginBottom: 20,
-          }}
-        >
-          {message}
-        </div>
-      )}
-
-      {/* Table */}
-      <div style={{ background: BRAND.surface, padding: 10, borderRadius: 8 }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', color: '#fff' }}>
-          <thead>
-            <tr>
-              <th style={thStyle}>Name</th>
-              <th style={thStyle}>Time</th>
-              <th style={thStyle}>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {invites.map((iv, idx) => (
-              <tr key={idx}>
-                <td style={tdStyle}>{iv.name}</td>
-                <td style={tdStyle}>{iv.time}</td>
-                <td style={tdStyle}>
-                  <span
-                    style={{
-                      display: 'inline-block',
-                      width: 14,
-                      height: 14,
-                      borderRadius: '50%',
-                      background: iv.status === 'first' ? '#4CAF50' : '#FFEB3B',
-                    }}
-                  ></span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       </div>
-    </div>
+    </RequireRole>
   );
 }
-
-const thStyle = {
-  textAlign: 'left',
-  padding: '8px 6px',
-  borderBottom: '1px solid #6D4C41',
-  fontSize: 14,
-};
-
-const tdStyle = {
-  padding: '8px 6px',
-  borderBottom: '1px solid #6D4C41',
-  fontSize: 14,
-};
