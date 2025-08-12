@@ -14,21 +14,16 @@ function randCode(len = 8) {
 
 export default function Admin() {
   const [user, setUser] = useState(null);
-
-  // NEW: events list + selection
   const [events, setEvents] = useState([]);
   const [selectedEventId, setSelectedEventId] = useState(null);
-
-  // CSV -> guests to insert
   const [guests, setGuests] = useState([]);
-
-  // Invites currently loaded for the selected event
   const [invites, setInvites] = useState([]);
-
   const [title, setTitle] = useState('Wedding');
   const [venue, setVenue] = useState('Hall');
   const [startAt, setStartAt] = useState('');
   const [endAt, setEndAt] = useState('');
+  const [designFile, setDesignFile] = useState(null); // NEW
+  const [designUrl, setDesignUrl] = useState(null); // NEW
 
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
 
@@ -36,15 +31,8 @@ export default function Admin() {
     supabase.auth.getUser().then(({ data }) => setUser(data.user));
   }, []);
 
-  // Fetch events on mount
-  useEffect(() => {
-    fetchEvents();
-  }, []);
-
-  // Whenever selected event changes, load its invites
-  useEffect(() => {
-    if (selectedEventId) loadInvites(selectedEventId);
-  }, [selectedEventId]);
+  useEffect(() => { fetchEvents(); }, []);
+  useEffect(() => { if (selectedEventId) loadInvites(selectedEventId); loadDesign(selectedEventId); }, [selectedEventId]);
 
   async function fetchEvents() {
     const { data, error } = await supabase
@@ -52,16 +40,9 @@ export default function Admin() {
       .select('id,title,start_at,created_at')
       .order('created_at', { ascending: false });
 
-    if (error) {
-      console.error(error);
-      alert('Failed to load events: ' + error.message);
-      return;
-    }
+    if (error) return alert('Failed to load events: ' + error.message);
     setEvents(data || []);
-    // Auto-select the most recent event if nothing selected yet
-    if (!selectedEventId && data && data.length) {
-      setSelectedEventId(data[0].id);
-    }
+    if (!selectedEventId && data?.length) setSelectedEventId(data[0].id);
   }
 
   async function loadInvites(eventId) {
@@ -71,38 +52,33 @@ export default function Admin() {
       .eq('event_id', eventId)
       .order('created_at', { ascending: true });
 
-    if (error) {
-      console.error(error);
-      alert('Failed to load guests: ' + error.message);
-      return;
-    }
+    if (error) return alert('Failed to load guests: ' + error.message);
     setInvites(data || []);
+  }
+
+  async function loadDesign(eventId) {
+    if (!eventId) return;
+    const { data } = await supabase
+      .storage
+      .from('designs')
+      .getPublicUrl(`${eventId}/design.png`);
+    if (data?.publicUrl) setDesignUrl(data.publicUrl);
+    else setDesignUrl(null);
   }
 
   async function createEvent() {
     if (!user) return alert('No user session');
     const { data, error } = await supabase
       .from('events')
-      .insert({
-        title,
-        venue,
-        start_at: startAt || null,
-        end_at: endAt || null,
-        created_by: user.id,
-      })
+      .insert({ title, venue, start_at: startAt || null, end_at: endAt || null, created_by: user.id })
       .select('id')
       .single();
 
-    if (error) {
-      alert(error.message);
-      return;
-    }
-
+    if (error) return alert(error.message);
     alert('Event created');
-    // Refresh events and select the newly created one
     await fetchEvents();
     setSelectedEventId(data.id);
-    setInvites([]); // clear current list until we load fresh
+    setInvites([]);
   }
 
   function handleCsv(e) {
@@ -124,18 +100,11 @@ export default function Admin() {
   }
 
   async function importGuests() {
-    const eid = selectedEventId;
-    if (!eid) {
-      alert('Please select or create an event first.');
-      return;
-    }
-    if (!guests.length) {
-      alert('Please choose a CSV with at least one guest.');
-      return;
-    }
+    if (!selectedEventId) return alert('Please select or create an event first.');
+    if (!guests.length) return alert('Please choose a CSV with at least one guest.');
 
     const rows = guests.map((g) => ({
-      event_id: eid,
+      event_id: selectedEventId,
       guest_name: g.guest_name,
       guest_contact: g.guest_contact,
       code: randCode(8),
@@ -143,13 +112,20 @@ export default function Admin() {
     }));
 
     const { data, error } = await supabase.from('invites').insert(rows).select('*');
-    if (error) {
-      alert(error.message);
-      return;
-    }
-    // Merge new invites with current list
+    if (error) return alert(error.message);
     setInvites((prev) => [...(prev || []), ...(data || [])]);
     alert(`Imported ${data?.length || 0} guests`);
+  }
+
+  async function uploadDesign() {
+    if (!designFile || !selectedEventId) return alert('Select an event and a file first.');
+    const { error } = await supabase
+      .storage
+      .from('designs')
+      .upload(`${selectedEventId}/design.png`, designFile, { upsert: true });
+    if (error) return alert(error.message);
+    alert('Design uploaded');
+    loadDesign(selectedEventId);
   }
 
   async function downloadCSV() {
@@ -164,61 +140,54 @@ export default function Admin() {
     a.click();
   }
 
-  // UPDATED: draw name under the QR in the PNG
   async function downloadQRCodes() {
-    const CANVAS_W = 512;
-    const CANVAS_H = 612;
-    const NAME_AREA_H = 100;
-
     for (const iv of invites || []) {
-      const url = `${baseUrl}/i/${iv.id}`;
-      const dataUrl = await QRCode.toDataURL(url, { width: 512, margin: 2 });
+      const qrUrl = `${baseUrl}/i/${iv.id}`;
+      const qrDataUrl = await QRCode.toDataURL(qrUrl, { width: 300, margin: 2 });
 
       const canvas = document.createElement('canvas');
-      canvas.width = CANVAS_W;
-      canvas.height = CANVAS_H;
       const ctx = canvas.getContext('2d');
 
-      // White background
-      ctx.fillStyle = '#fff';
-      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+      if (designUrl) {
+        // Load design first
+        const designImg = await loadImage(designUrl);
+        canvas.width = designImg.width;
+        canvas.height = designImg.height;
+        ctx.drawImage(designImg, 0, 0);
 
-      // Draw QR image
-      const img = new Image();
-      await new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = reject;
-        img.src = dataUrl;
-      });
-      ctx.drawImage(img, 0, 0, 512, 512);
+        // Load QR and place middle bottom (up a bit)
+        const qrImg = await loadImage(qrDataUrl);
+        const qrSize = 250;
+        const qrX = (canvas.width - qrSize) / 2;
+        const qrY = canvas.height - qrSize - 80; // 80px from bottom
+        ctx.drawImage(qrImg, qrX, qrY, qrSize, qrSize);
+      } else {
+        // fallback: plain QR
+        canvas.width = 512;
+        canvas.height = 612;
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, 512, 612);
+        const qrImg = await loadImage(qrDataUrl);
+        ctx.drawImage(qrImg, 106, 80, 300, 300);
+      }
 
-      // Name text
-      const name = iv.guest_name || 'Guest';
-      ctx.fillStyle = '#000';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      // If you’ll print Arabic names, you can use RTL:
-      // ctx.direction = 'rtl';
-      let fontSize = 28;
-      const maxWidth = CANVAS_W - 40;
-      do {
-        ctx.font = `bold ${fontSize}px Tahoma, Arial, sans-serif`;
-        if (ctx.measureText(name).width <= maxWidth) break;
-        fontSize -= 2;
-      } while (fontSize > 14);
-
-      ctx.fillText(name, CANVAS_W / 2, 512 + NAME_AREA_H / 2);
-
-      // Download
       const outUrl = canvas.toDataURL('image/png');
       const a = document.createElement('a');
-      const safeName = name.replace(/[\\/:*?"<>|]/g, '_');
       a.href = outUrl;
-      a.download = `${safeName}_${iv.code || ''}.png`;
+      a.download = `${iv.guest_name || 'Guest'}_${iv.code || ''}.png`;
       a.click();
-
       await new Promise((r) => setTimeout(r, 200));
     }
+  }
+
+  function loadImage(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = src;
+    });
   }
 
   return (
@@ -226,102 +195,53 @@ export default function Admin() {
       <div style={{ padding: 20, fontFamily: 'sans-serif' }}>
         <h2>Admin</h2>
 
-        {/* Event Picker (NEW) */}
-        <section style={{ border: '1px solid #ddd', padding: 12, marginBottom: 16 }}>
+        {/* Event Picker */}
+        <section>
           <h3>Select event</h3>
-          {events.length === 0 && <p>No events yet. Create one below.</p>}
-          {events.length > 0 && (
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <select
-                value={selectedEventId || ''}
-                onChange={(e) => setSelectedEventId(e.target.value || null)}
-              >
-                {events.map((ev) => (
-                  <option key={ev.id} value={ev.id}>
-                    {ev.title}
-                  </option>
-                ))}
-              </select>
-              <button onClick={() => loadInvites(selectedEventId)} disabled={!selectedEventId}>
-                Refresh guests
-              </button>
-              <button onClick={fetchEvents}>Refresh events</button>
-            </div>
-          )}
+          <select
+            value={selectedEventId || ''}
+            onChange={(e) => setSelectedEventId(e.target.value || null)}
+          >
+            {events.map((ev) => (
+              <option key={ev.id} value={ev.id}>
+                {ev.title}
+              </option>
+            ))}
+          </select>
         </section>
 
-        {/* Create event */}
-        <section style={{ border: '1px solid #ddd', padding: 12, marginBottom: 16 }}>
+        {/* Create Event */}
+        <section>
           <h3>Create event</h3>
-          <label>Title</label>
-          <input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            style={{ display: 'block', width: '100%', marginBottom: 8 }}
-          />
-          <label>Venue</label>
-          <input
-            value={venue}
-            onChange={(e) => setVenue(e.target.value)}
-            style={{ display: 'block', width: '100%', marginBottom: 8 }}
-          />
-          <label>Start</label>
-          <input
-            type="datetime-local"
-            value={startAt}
-            onChange={(e) => setStartAt(e.target.value)}
-            style={{ display: 'block', marginBottom: 8 }}
-          />
-          <label>End</label>
-          <input
-            type="datetime-local"
-            value={endAt}
-            onChange={(e) => setEndAt(e.target.value)}
-            style={{ display: 'block', marginBottom: 8 }}
-          />
+          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" />
+          <input value={venue} onChange={(e) => setVenue(e.target.value)} placeholder="Venue" />
+          <input type="datetime-local" value={startAt} onChange={(e) => setStartAt(e.target.value)} />
+          <input type="datetime-local" value={endAt} onChange={(e) => setEndAt(e.target.value)} />
           <button onClick={createEvent}>Create</button>
         </section>
 
-        {/* Upload guests (CSV) */}
-        <section style={{ border: '1px solid #ddd', padding: 12, marginBottom: 16 }}>
+        {/* Upload Design */}
+        <section>
+          <h3>Invitation Design</h3>
+          {designUrl && <img src={designUrl} alt="Design preview" style={{ maxWidth: 300 }} />}
+          <input type="file" accept="image/*" onChange={(e) => setDesignFile(e.target.files?.[0])} />
+          <button onClick={uploadDesign}>Upload Design</button>
+        </section>
+
+        {/* Upload guests */}
+        <section>
           <h3>Upload guests (CSV)</h3>
-          <p>
-            Columns: <code>guest_name, guest_contact</code>
-          </p>
           <input type="file" accept=".csv" onChange={handleCsv} />
-          <button onClick={importGuests} disabled={!guests.length || !selectedEventId}>
-            Import guests
-          </button>
+          <button onClick={importGuests}>Import guests</button>
         </section>
 
         {/* Export */}
-        <section style={{ border: '1px solid #ddd', padding: 12, marginBottom: 16 }}>
+        <section>
           <h3>Export</h3>
-          <button onClick={downloadCSV} disabled={!invites.length}>
-            Download CSV (links)
+          <button onClick={downloadCSV}>Download CSV</button>
+          <button onClick={downloadQRCodes} style={{ marginLeft: 8 }}>
+            Download QR Invitations
           </button>
-          <button onClick={downloadQRCodes} disabled={!invites.length} style={{ marginInlineStart: 8 }}>
-            Download QR images
-          </button>
-        </section>
-
-        {/* Invites list */}
-        <section style={{ border: '1px solid #ddd', padding: 12 }}>
-          <h3>Invites</h3>
-          {!selectedEventId && <p>Select an event to view guests.</p>}
-          {selectedEventId && invites.length === 0 && <p>— no guests —</p>}
-          {selectedEventId && invites.length > 0 && (
-            <ul>
-              {invites.map((iv) => (
-                <li key={iv.id}>
-                  {iv.guest_name} — {iv.code} — {iv.status} —{' '}
-                  <a href={`${baseUrl}/i/${iv.id}`} target="_blank">
-                    link
-                  </a>
-                </li>
-              ))}
-            </ul>
-          )}
         </section>
       </div>
     </RequireRole>
