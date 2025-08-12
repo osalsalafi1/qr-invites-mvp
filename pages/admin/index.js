@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { supabase } from '@/src/lib/supabaseClient';
 import RequireRole from '@/components/RequireRole';
 import Papa from 'papaparse';
@@ -77,18 +77,26 @@ export default function Admin() {
   const [designFile, setDesignFile] = useState(null);
   const [designUrl, setDesignUrl] = useState(null);
 
+  // QR placement config (percentages so it adapts to any design size)
+  // center X/Y in %, and size as % of image width
+  const [qrCfg, setQrCfg] = useState({ xPct: 50, yPct: 85, sizePct: 25, transparent: true });
+  const previewRef = useRef(null);
+  const designImgRef = useRef(null);
+
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
-  const DESIGN_BUCKET = 'invitation-designs'; // make sure this bucket exists
+  const DESIGN_BUCKET = 'invitation-designs'; // make sure this exists in Supabase Storage
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUser(data.user));
   }, []);
 
   useEffect(() => { fetchEvents(); }, []);
+
   useEffect(() => {
     if (selectedEventId) {
       loadInvites(selectedEventId);
       loadDesign(selectedEventId);
+      loadQrCfg(selectedEventId);
     } else {
       setInvites([]);
       setDesignUrl(null);
@@ -129,6 +137,23 @@ export default function Admin() {
       .from(DESIGN_BUCKET)
       .getPublicUrl(`${eventId}/design.png`);
     setDesignUrl(data?.publicUrl || null);
+    // preview will re-render when image loads
+  }
+
+  function loadQrCfg(eventId) {
+    try {
+      const raw = localStorage.getItem(`qr_cfg_${eventId}`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') setQrCfg({ ...qrCfg, ...parsed });
+      }
+    } catch {}
+  }
+
+  function saveQrCfg() {
+    if (!selectedEventId) return;
+    localStorage.setItem(`qr_cfg_${selectedEventId}`, JSON.stringify(qrCfg));
+    alert('QR placement saved for this event.');
   }
 
   async function createEvent() {
@@ -223,57 +248,99 @@ export default function Admin() {
     return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
   }
 
+  // ---------- PREVIEW RENDER ----------
+  useEffect(() => {
+    renderPreview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [designUrl, qrCfg, selectedEventId]);
+
+  async function renderPreview() {
+    const canvas = previewRef.current;
+    if (!canvas || !designUrl) return;
+    const ctx = canvas.getContext('2d');
+
+    const img = await loadImage(designUrl);
+    const maxW = 520; // preview size (not full res)
+    const scale = img.width > maxW ? maxW / img.width : 1;
+    const w = Math.round(img.width * scale);
+    const h = Math.round(img.height * scale);
+
+    canvas.width = w;
+    canvas.height = h;
+
+    ctx.clearRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
+
+    // compute QR rect from cfg
+    const qrSize = Math.round((qrCfg.sizePct / 100) * w);
+    const cx = Math.round((qrCfg.xPct / 100) * w);
+    const cy = Math.round((qrCfg.yPct / 100) * h);
+    const x = cx - Math.floor(qrSize / 2);
+    const y = cy - Math.floor(qrSize / 2);
+
+    // draw a translucent box to show placement
+    ctx.save();
+    ctx.strokeStyle = '#00E676';
+    ctx.lineWidth = 2;
+    ctx.fillStyle = 'rgba(0, 230, 118, 0.15)';
+    ctx.fillRect(x, y, qrSize, qrSize);
+    ctx.strokeRect(x, y, qrSize, qrSize);
+
+    // draw a sample QR on preview (transparent bg if chosen)
+    const previewQr = await QRCode.toDataURL('SAMPLE', {
+      width: qrSize,
+      margin: 0,
+      color: { dark: '#000000', light: qrCfg.transparent ? '#0000' : '#FFFFFF' },
+    });
+    const qrImg = await loadImage(previewQr);
+    ctx.drawImage(qrImg, x, y, qrSize, qrSize);
+    ctx.restore();
+  }
+
+  // ---------- DOWNLOAD INVITATIONS USING CONFIG ----------
   async function downloadQRCodes() {
+    if (!designUrl) {
+      return alert('Upload a design first, then set QR position/size.');
+    }
+
+    const designImg = await loadImage(designUrl);
+
     for (const iv of invites || []) {
       const qrUrl = `${baseUrl}/i/${iv.id}`;
-      const qrDataUrl = await QRCode.toDataURL(qrUrl, { width: 720, margin: 1 });
+
+      // Build QR with transparent bg if chosen
+      const qrDataUrl = await QRCode.toDataURL(qrUrl, {
+        width: Math.floor((qrCfg.sizePct / 100) * designImg.width),
+        margin: 0, // IMPORTANT: no white margin
+        color: { dark: '#000000', light: qrCfg.transparent ? '#0000' : '#FFFFFF' },
+      });
 
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
+      canvas.width = designImg.width;
+      canvas.height = designImg.height;
 
-      if (designUrl) {
-        const designImg = await loadImage(designUrl);
-        canvas.width = designImg.width;
-        canvas.height = designImg.height;
-        ctx.drawImage(designImg, 0, 0);
+      // draw design
+      ctx.drawImage(designImg, 0, 0);
 
-        // QR centered near bottom (slightly up)
-        const qrImg = await loadImage(qrDataUrl);
-        const qrSize = Math.floor(Math.min(canvas.width, canvas.height) * 0.25);
-        const qrX = Math.floor((canvas.width - qrSize) / 2);
-        const qrY = Math.floor(canvas.height - qrSize - (canvas.height * 0.08));
-        ctx.drawImage(qrImg, qrX, qrY, qrSize, qrSize);
-      } else {
-        // fallback: white background + QR + name
-        const CANVAS_W = 512, CANVAS_H = 612;
-        canvas.width = CANVAS_W; canvas.height = CANVAS_H;
-        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+      // compute QR rect
+      const qrSize = Math.floor((qrCfg.sizePct / 100) * designImg.width);
+      const cx = Math.floor((qrCfg.xPct / 100) * designImg.width);
+      const cy = Math.floor((qrCfg.yPct / 100) * designImg.height);
+      const x = cx - Math.floor(qrSize / 2);
+      const y = cy - Math.floor(qrSize / 2);
 
-        const qrImg = await loadImage(qrDataUrl);
-        const qrSize = 360, qrX = (CANVAS_W - qrSize) / 2, qrY = 80;
-        ctx.drawImage(qrImg, qrX, qrY, qrSize, qrSize);
+      const qrImg = await loadImage(qrDataUrl);
+      ctx.drawImage(qrImg, x, y, qrSize, qrSize);
 
-        const name = iv.guest_name || 'Guest';
-        ctx.fillStyle = '#000';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        let fontSize = 28;
-        const maxWidth = CANVAS_W - 40;
-        do {
-          ctx.font = `bold ${fontSize}px Tahoma, Arial, sans-serif`;
-          if (ctx.measureText(name).width <= maxWidth) break;
-          fontSize -= 2;
-        } while (fontSize > 14);
-        ctx.fillText(name, CANVAS_W / 2, 512 + 50);
-      }
-
+      // download
       const outUrl = canvas.toDataURL('image/png');
       const a = document.createElement('a');
       a.href = outUrl;
       a.download = `${(iv.guest_name || 'Guest').replace(/[\\/:*?"<>|]/g, '_')}_${iv.code || ''}.png`;
       a.click();
 
-      await new Promise((r) => setTimeout(r, 150));
+      await new Promise((r) => setTimeout(r, 120));
     }
   }
 
@@ -299,7 +366,9 @@ export default function Admin() {
       }}>
         <header style={{ textAlign: 'center', marginBottom: 18 }}>
           <h1 style={{ margin: 0, fontSize: 28 }}>Ya Mar7aba – Admin</h1>
-          <p style={{ margin: 0, color: BRAND.textMuted, fontSize: 13 }}>Manage events, guests, and invitation designs</p>
+          <p style={{ margin: 0, color: BRAND.textMuted, fontSize: 13 }}>
+            Manage events, guests, and invitation designs
+          </p>
         </header>
 
         <div style={{ maxWidth: 1000, margin: '0 auto', display: 'grid', gap: 16, gridTemplateColumns: '1fr' }}>
@@ -347,18 +416,70 @@ export default function Admin() {
 
           {/* Row 2: Invitation Design + Upload guests */}
           <div style={{ display: 'grid', gap: 16, gridTemplateColumns: '1fr 1fr' }}>
-            {/* Invitation Design */}
+            {/* Invitation Design + QR Placement */}
             <section style={section}>
-              <h3 style={h3}>Invitation Design</h3>
-              {designUrl && (
-                <div style={{ marginBottom: 10 }}>
-                  <img src={designUrl} alt="Design preview" style={{ maxWidth: '100%', borderRadius: 12, border: `1px solid ${BRAND.border}` }} />
-                </div>
+              <h3 style={h3}>Invitation Design & QR Placement</h3>
+
+              {designUrl ? (
+                <>
+                  <div style={{ marginBottom: 10 }}>
+                    <canvas ref={previewRef} style={{ width: '100%', borderRadius: 12, border: `1px solid ${BRAND.border}`, background: '#000' }} />
+                  </div>
+
+                  <div style={{ display: 'grid', gap: 10, gridTemplateColumns: '1fr 1fr' }}>
+                    <div>
+                      <label style={label}>QR Horizontal (X%)</label>
+                      <input
+                        type="range" min="0" max="100" value={qrCfg.xPct}
+                        onChange={(e) => setQrCfg(v => ({ ...v, xPct: Number(e.target.value) }))}
+                        style={{ width: '100%' }}
+                      />
+                      <div style={{ fontSize: 12, color: BRAND.textMuted }}>{qrCfg.xPct}%</div>
+                    </div>
+                    <div>
+                      <label style={label}>QR Vertical (Y%)</label>
+                      <input
+                        type="range" min="0" max="100" value={qrCfg.yPct}
+                        onChange={(e) => setQrCfg(v => ({ ...v, yPct: Number(e.target.value) }))}
+                        style={{ width: '100%' }}
+                      />
+                      <div style={{ fontSize: 12, color: BRAND.textMuted }}>{qrCfg.yPct}%</div>
+                    </div>
+                    <div>
+                      <label style={label}>QR Size (% of image width)</label>
+                      <input
+                        type="range" min="5" max="50" value={qrCfg.sizePct}
+                        onChange={(e) => setQrCfg(v => ({ ...v, sizePct: Number(e.target.value) }))}
+                        style={{ width: '100%' }}
+                      />
+                      <div style={{ fontSize: 12, color: BRAND.textMuted }}>{qrCfg.sizePct}%</div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <input
+                        id="transparentBg"
+                        type="checkbox"
+                        checked={qrCfg.transparent}
+                        onChange={(e) => setQrCfg(v => ({ ...v, transparent: e.target.checked }))}
+                      />
+                      <label htmlFor="transparentBg" style={{ margin: 0 }}>Transparent QR background</label>
+                    </div>
+                  </div>
+
+                  <div style={{ height: 12 }} />
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                    <button style={btn(BRAND.accent)} onClick={saveQrCfg}>Save QR placement</button>
+                    <button style={btn()} onClick={renderPreview}>Preview again</button>
+                  </div>
+                </>
+              ) : (
+                <p style={{ color: BRAND.textMuted }}>Upload a design to place the QR.</p>
               )}
+
+              <div style={{ height: 12 }} />
               <input type="file" accept="image/*" onChange={(e) => setDesignFile(e.target.files?.[0] || null)}
                      style={{ ...input, padding: 8, background: 'transparent', border: '1px dashed ' + BRAND.inputBorder }} />
               <div style={{ height: 10 }} />
-              <button style={btn(BRAND.accent)} onClick={uploadDesign}>Upload Design</button>
+              <button style={btn(BRAND.accent)} onClick={uploadDesign}>Upload/Replace Design</button>
               <p style={{ color: BRAND.textMuted, fontSize: 12, marginTop: 8 }}>
                 Stored at: <code>invitation-designs/{selectedEventId || 'eventId'}/design.png</code>
               </p>
@@ -388,8 +509,8 @@ export default function Admin() {
                 <button style={btn(BRAND.accent)} onClick={downloadCSV} disabled={!invites.length}>
                   Download CSV (links)
                 </button>
-                <button style={btn()} onClick={downloadQRCodes} disabled={!invites.length}>
-                  Download QR Invitations
+                <button style={btn()} onClick={downloadQRCodes} disabled={!invites.length || !designUrl}>
+                  Generate Invitations (with QR)
                 </button>
               </div>
             </section>
