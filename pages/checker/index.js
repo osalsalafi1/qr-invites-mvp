@@ -4,6 +4,7 @@ import { supabase } from '@/src/lib/supabaseClient';
 import RequireRole from '@/components/RequireRole';
 
 const STORAGE_KEY = 'qr_checker_scans_v1';
+const LANG_KEY = 'qr_checker_language';
 
 export default function Checker() {
   const [user, setUser] = useState(null);
@@ -13,13 +14,57 @@ export default function Checker() {
   const [running, setRunning] = useState(false);
   const [scans, setScans] = useState([]);
   const [lastStatus, setLastStatus] = useState(null); 
-  const [lastTime, setLastTime] = useState(null); // for already scanned time
+  const [lastTime, setLastTime] = useState(null);
+  const [language, setLanguage] = useState('en'); // NEW
+
   const scansRef = useRef(scans);
   const seenRef = useRef(new Set());
   const qrRef = useRef(null);
   const manualRef = useRef(null);
 
+  const translations = {
+    en: {
+      brand: "Ya Mar7aba - Scanner",
+      findCams: "Find cameras",
+      startScanner: "▶ Start Scanner",
+      stopScanner: "■ Stop Scanner",
+      firstScan: "✅ First Time Scan - Welcome!",
+      alreadyScan: "❌ Already Scanned",
+      cameraError: "Camera error:",
+      manualAdd: "Manual add",
+      manualPlaceholder: "UUID or QR URL",
+      add: "Add",
+      scansTitle: "Scans (this device)",
+      noScans: "No scans yet",
+      guest: "Guest",
+      time: "Time",
+      status: "Status",
+      langSwitch: "عربي"
+    },
+    ar: {
+      brand: "يا مرحبا - الماسح",
+      findCams: "البحث عن الكاميرات",
+      startScanner: "▶ بدء الماسح",
+      stopScanner: "■ إيقاف الماسح",
+      firstScan: "✅ أول مرة - أهلاً وسهلاً!",
+      alreadyScan: "❌ تم المسح مسبقًا",
+      cameraError: "خطأ في الكاميرا:",
+      manualAdd: "إضافة يدويًا",
+      manualPlaceholder: "المعرف أو رابط QR",
+      add: "إضافة",
+      scansTitle: "المسحات (هذا الجهاز)",
+      noScans: "لا توجد مسحات حتى الآن",
+      guest: "الضيف",
+      time: "الوقت",
+      status: "الحالة",
+      langSwitch: "English"
+    }
+  };
+
   useEffect(() => {
+    const storedLang = localStorage.getItem(LANG_KEY);
+    if (storedLang) setLanguage(storedLang);
+
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
@@ -43,6 +88,12 @@ export default function Checker() {
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUser(data.user)).catch(() => {});
   }, []);
+
+  function toggleLanguage() {
+    const newLang = language === 'en' ? 'ar' : 'en';
+    setLanguage(newLang);
+    localStorage.setItem(LANG_KEY, newLang);
+  }
 
   function normalizeId(text) {
     try {
@@ -80,7 +131,6 @@ export default function Checker() {
     try {
       const mod = await import('html5-qrcode');
       const { Html5Qrcode } = mod;
-
       const mountId = 'qr-reader';
       const el = document.getElementById(mountId);
       if (!el) return;
@@ -170,15 +220,25 @@ export default function Checker() {
     return <span style={{ display: 'inline-block', width: 12, height: 12, borderRadius: '50%', background: color }} />;
   }
 
+  const t = translations[language];
+
   return (
     <RequireRole role={['checker','admin']}>
       <div style={{ padding: 16, fontFamily: 'sans-serif', maxWidth: 820, margin: '0 auto', background: '#3E2723', color: '#fff', borderRadius: 8 }}>
-        <h1 style={{ textAlign: 'center', fontSize: 28, marginBottom: 20 }}>Ya Mar7aba - Scanner</h1>
+        
+        {/* Language Switch */}
+        <div style={{ textAlign: 'right', marginBottom: 10 }}>
+          <button onClick={toggleLanguage} style={{ background: '#8D6E63', color: '#fff', border: 'none', borderRadius: 4, padding: '6px 12px' }}>
+            {t.langSwitch}
+          </button>
+        </div>
+
+        <h1 style={{ textAlign: 'center', fontSize: 28, marginBottom: 20 }}>{t.brand}</h1>
 
         {/* Start/Stop Camera */}
         <div style={{ marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
           {!cams.length && (
-            <button onClick={listCameras} style={{ padding: '12px 20px', fontSize: 18, background: '#8D6E63', color: '#fff', border: 'none', borderRadius: 6 }}>Find cameras</button>
+            <button onClick={listCameras} style={{ padding: '12px 20px', fontSize: 18, background: '#8D6E63', color: '#fff', border: 'none', borderRadius: 6 }}>{t.findCams}</button>
           )}
           {cams.length > 0 && (
             <>
@@ -194,9 +254,9 @@ export default function Checker() {
                 ))}
               </select>
               {!running ? (
-                <button onClick={startCamera} style={{ padding: '14px 28px', fontSize: 20, background: '#6D4C41', color: '#fff', border: 'none', borderRadius: 8 }}>▶ Start Scanner</button>
+                <button onClick={startCamera} style={{ padding: '14px 28px', fontSize: 20, background: '#6D4C41', color: '#fff', border: 'none', borderRadius: 8 }}>{t.startScanner}</button>
               ) : (
-                <button onClick={stopCamera} style={{ padding: '14px 28px', fontSize: 20, background: '#B71C1C', color: '#fff', border: 'none', borderRadius: 8 }}>■ Stop Scanner</button>
+                <button onClick={stopCamera} style={{ padding: '14px 28px', fontSize: 20, background: '#B71C1C', color: '#fff', border: 'none', borderRadius: 8 }}>{t.stopScanner}</button>
               )}
             </>
           )}
@@ -207,44 +267,44 @@ export default function Checker() {
 
         {/* Status Message */}
         {lastStatus === 'OK' && (
-          <div style={{ background: '#2E7D32', padding: 12, marginTop: 10, borderRadius: 6, textAlign: 'center' }}>✅ First Time Scan - Welcome!</div>
+          <div style={{ background: '#2E7D32', padding: 12, marginTop: 10, borderRadius: 6, textAlign: 'center' }}>{t.firstScan}</div>
         )}
         {lastStatus === 'ALREADY' && (
           <div style={{ background: '#C62828', padding: 12, marginTop: 10, borderRadius: 6, textAlign: 'center' }}>
-            ❌ Already Scanned {lastTime ? `(at ${lastTime})` : ''}
+            {t.alreadyScan} {lastTime ? `(${lastTime})` : ''}
           </div>
         )}
 
         {/* Error */}
         {errorMsg && (
           <div style={{ marginTop: 10, padding: 10, background: '#FFCDD2', color: '#B71C1C', borderRadius: 6 }}>
-            <b>Camera error:</b> {errorMsg}
+            <b>{t.cameraError}</b> {errorMsg}
           </div>
         )}
 
         {/* Manual input */}
         <div style={{ marginTop: 14 }}>
-          <h4>Manual add</h4>
-          <input ref={manualRef} placeholder="UUID or QR URL" style={{ width: 260, padding: 8, borderRadius: 6 }} />
-          <button onClick={manualAdd} style={{ marginInlineStart: 8, padding: '8px 14px', background: '#8D6E63', color: '#fff', border: 'none', borderRadius: 6 }}>Add</button>
+          <h4>{t.manualAdd}</h4>
+          <input ref={manualRef} placeholder={t.manualPlaceholder} style={{ width: 260, padding: 8, borderRadius: 6 }} />
+          <button onClick={manualAdd} style={{ marginInlineStart: 8, padding: '8px 14px', background: '#8D6E63', color: '#fff', border: 'none', borderRadius: 6 }}>{t.add}</button>
         </div>
 
         {/* Table */}
         <div style={{ marginTop: 20 }}>
-          <h3>Scans (this device)</h3>
+          <h3>{t.scansTitle}</h3>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', background: '#4E342E', borderRadius: 8, overflow: 'hidden' }}>
               <thead style={{ background: '#3E2723' }}>
                 <tr>
                   <th style={{ padding: 8 }}>#</th>
-                  <th style={{ padding: 8 }}>Guest</th>
-                  <th style={{ padding: 8 }}>Time</th>
-                  <th style={{ padding: 8 }}>Status</th>
+                  <th style={{ padding: 8 }}>{t.guest}</th>
+                  <th style={{ padding: 8 }}>{t.time}</th>
+                  <th style={{ padding: 8 }}>{t.status}</th>
                 </tr>
               </thead>
               <tbody>
                 {scans.length === 0 ? (
-                  <tr><td colSpan={4} style={{ padding: 12, textAlign: 'center', color: '#BCAAA4' }}>No scans yet</td></tr>
+                  <tr><td colSpan={4} style={{ padding: 12, textAlign: 'center', color: '#BCAAA4' }}>{t.noScans}</td></tr>
                 ) : (
                   scans.map((r, idx) => (
                     <tr key={`${r.id}-${idx}`} style={{ borderBottom: '1px solid #6D4C41' }}>
