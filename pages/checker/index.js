@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { supabase } from '@/src/lib/supabaseClient';
+import { supabase } from '@/src/lib/supabaseClient'; // only used to fetch guest_name (optional)
 import RequireRole from '@/components/RequireRole';
 
 export default function Checker() {
@@ -9,12 +9,13 @@ export default function Checker() {
   const [cams, setCams] = useState([]);          // available cameras
   const [deviceId, setDeviceId] = useState('');  // chosen camera
   const [running, setRunning] = useState(false); // is scanner running
-  const [scans, setScans] = useState([]);        // table rows: {name, time, status}
+  const [scans, setScans] = useState([]);        // table rows: {id, name, time, status}
+  const seenRef = useRef(new Set());             // session memory of scanned IDs
   const qrRef = useRef(null);                    // Html5Qrcode instance
   const manualRef = useRef(null);
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => setUser(data.user));
+    supabase.auth.getUser().then(({ data }) => setUser(data.user)).catch(() => {});
   }, []);
 
   // Ask permission & enumerate cameras (iOS needs a user gesture)
@@ -60,8 +61,7 @@ export default function Checker() {
         { deviceId: { exact: chosen } },
         { fps: 10, qrbox: { width: 260, height: 260 } },
         async (decodedText) => {
-          // Immediately stop camera on first decode
-          await stopCamera();
+          await stopCamera();        // stop immediately after 1 decode
           await handleDecoded(decodedText);
         },
         () => {} // ignore continuous scan failures
@@ -82,100 +82,78 @@ export default function Checker() {
     setRunning(false);
   }
 
-  // Read → decide → update → verify → append to table and color (green/red)
-  async function handleDecoded(text) {
-    const now = new Date().toLocaleString();
+  // Parse /i/{inviteId}. Returns {id} or null
+  function extractIdFromText(text) {
     try {
       const url = new URL(text);
       const parts = url.pathname.split('/').filter(Boolean);
-      // Expect /i/{inviteId}
       const id = parts[1] || parts[0];
-      if (!id) {
-        setScans(prev => [{ name: 'Unknown', time: now, status: 'INVALID' }, ...prev]);
-        return;
-      }
+      return id || null;
+    } catch {
+      // Not a URL? Maybe the raw text is the UUID itself
+      const maybe = (text || '').trim();
+      return maybe || null;
+    }
+  }
 
-      // 1) Read current status first
-      const { data: invite, error: readErr } = await supabase
+  // Session-based decision:
+  // If id already in table → "ALREADY"
+  // Else → "OK" and remember it
+  async function handleDecoded(text) {
+    const now = new Date().toLocaleString();
+    const id = extractIdFromText(text);
+
+    if (!id) {
+      setScans(prev => [{ id: '-', name: 'Invalid QR', time: now, status: 'INVALID' }, ...prev]);
+      return;
+    }
+
+    if (seenRef.current.has(id)) {
+      // Already scanned in this session
+      // We only display; no DB update
+      const name = await fetchNameIfPossible(id);
+      setScans(prev => [{ id, name, time: now, status: 'ALREADY' }, ...prev]);
+      return;
+    }
+
+    // First time in this session
+    seenRef.current.add(id);
+    const name = await fetchNameIfPossible(id);
+    setScans(prev => [{ id, name, time: now, status: 'OK' }, ...prev]);
+  }
+
+  // Optional: fetch guest name from DB for nicer display.
+  async function fetchNameIfPossible(id) {
+    try {
+      const { data, error } = await supabase
         .from('invites')
-        .select('id, guest_name, status')
+        .select('guest_name')
         .eq('id', id)
         .single();
-
-      if (readErr || !invite) {
-        setScans(prev => [{ name: 'Not found', time: now, status: 'NOT_FOUND' }, ...prev]);
-        return;
-      }
-
-      const name = invite.guest_name || 'Guest';
-      const status = (invite.status || '').toUpperCase();
-
-      if (status === 'CHECKED_IN') {
-        setScans(prev => [{ name, time: now, status: 'ALREADY' }, ...prev]);
-        return;
-      }
-      if (status !== 'PENDING') {
-        setScans(prev => [{ name, time: now, status: `BLOCKED:${invite.status}` }, ...prev]);
-        return;
-      }
-
-      // 2) Try to flip PENDING -> CHECKED_IN (atomic)
-      const { data: updated, error: updErr } = await supabase
-        .from('invites')
-        .update({
-          status: 'CHECKED_IN',
-          checked_in_at: new Date().toISOString(),
-          checked_in_by: user?.id || null
-        })
-        .eq('id', id)
-        .eq('status', 'PENDING')
-        .select('id');
-
-      if (updErr) {
-        setScans(prev => [{ name, time: now, status: `ERROR:${updErr.message}` }, ...prev]);
-        return;
-      }
-
-      if (!updated || updated.length === 0) {
-        // Re-read to confirm final state
-        const { data: after } = await supabase
-          .from('invites')
-          .select('guest_name, status')
-          .eq('id', id)
-          .single();
-        if ((after?.status || '').toUpperCase() === 'CHECKED_IN') {
-          setScans(prev => [{ name: after?.guest_name || name, time: now, status: 'ALREADY' }, ...prev]);
-        } else {
-          setScans(prev => [{ name: after?.guest_name || name, time: now, status: `BLOCKED:${after?.status}` }, ...prev]);
-        }
-        return;
-      }
-
-      // 3) Success
-      setScans(prev => [{ name, time: now, status: 'OK' }, ...prev]);
-    } catch (_e) {
-      setScans(prev => [{ name: 'Invalid QR', time: now, status: 'INVALID' }, ...prev]);
+      if (error || !data) return 'Guest';
+      return data.guest_name || 'Guest';
+    } catch {
+      return 'Guest';
     }
   }
 
   async function manualCheckin() {
     const id = manualRef.current?.value?.trim();
     if (!id) return;
-    const origin = typeof window !== 'undefined' ? window.location.origin : '';
     await stopCamera();
-    await handleDecoded(`${origin}/i/${id}`);
+    await handleDecoded(id);
   }
 
-  // Small dot renderer
+  // Status dot
   function Dot({ status }) {
     const ok = status === 'OK';
     const already = status === 'ALREADY';
-    const invalid = status === 'INVALID' || status?.startsWith('ERROR') || status?.startsWith('BLOCKED') || status === 'NOT_FOUND';
+    const invalid = status === 'INVALID';
     const color = ok ? '#16a34a' : already ? '#f59e0b' : invalid ? '#ef4444' : '#6b7280';
     const label =
-      ok ? 'First check-in' :
-      already ? 'Already used' :
-      invalid ? (status === 'NOT_FOUND' ? 'Not found' : 'Invalid / Blocked') :
+      ok ? 'First in table' :
+      already ? 'Already in table' :
+      invalid ? 'Invalid' :
       status;
     return (
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -213,9 +191,6 @@ export default function Checker() {
               ) : (
                 <button onClick={stopCamera}>Stop camera</button>
               )}
-              <button onClick={() => setScans([])} style={{ marginLeft: 'auto' }}>
-                Clear table
-              </button>
             </>
           )}
         </div>
@@ -230,20 +205,20 @@ export default function Checker() {
 
         {/* Manual input */}
         <div style={{ marginTop: 14 }}>
-          <h4>Manual input (invite UUID)</h4>
+          <h4>Manual input (invite UUID or full URL)</h4>
           <input
             ref={manualRef}
-            placeholder="550e8400-e29b-41d4-a716-446655440000"
+            placeholder="550e8400-e29b-41d4-a716-446655440000  OR  https://.../i/UUID"
             style={{ width: 360, maxWidth: '100%' }}
           />
           <button onClick={manualCheckin} style={{ marginInlineStart: 8 }}>
-            Check-in
+            Add to table
           </button>
         </div>
 
-        {/* Scan results table */}
+        {/* Scan results table (session-based) */}
         <div style={{ marginTop: 20 }}>
-          <h3>Scans</h3>
+          <h3>Scans (this session)</h3>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
@@ -252,18 +227,20 @@ export default function Checker() {
                   <th style={{ padding: '8px 6px' }}>Guest</th>
                   <th style={{ padding: '8px 6px' }}>Time</th>
                   <th style={{ padding: '8px 6px' }}>Status</th>
+                  <th style={{ padding: '8px 6px' }}>ID</th>
                 </tr>
               </thead>
               <tbody>
                 {scans.length === 0 ? (
-                  <tr><td colSpan={4} style={{ padding: 12, color: '#6b7280' }}>No scans yet</td></tr>
+                  <tr><td colSpan={5} style={{ padding: 12, color: '#6b7280' }}>No scans yet</td></tr>
                 ) : (
                   scans.map((r, idx) => (
-                    <tr key={idx} style={{ borderBottom: '1px solid #f3f4f6' }}>
+                    <tr key={`${r.id}-${idx}`} style={{ borderBottom: '1px solid #f3f4f6' }}>
                       <td style={{ padding: '8px 6px' }}>{scans.length - idx}</td>
                       <td style={{ padding: '8px 6px' }}>{r.name}</td>
                       <td style={{ padding: '8px 6px' }}>{r.time}</td>
                       <td style={{ padding: '8px 6px' }}><Dot status={r.status} /></td>
+                      <td style={{ padding: '8px 6px', fontFamily: 'monospace' }}>{r.id}</td>
                     </tr>
                   ))
                 )}
