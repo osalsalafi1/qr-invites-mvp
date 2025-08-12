@@ -4,71 +4,79 @@ import { supabase } from '@/src/lib/supabaseClient';
 import RequireRole from '@/components/RequireRole';
 
 export default function Checker() {
+  const [user, setUser] = useState(null);
   const [result, setResult] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
-  const [user, setUser] = useState(null);
-  const manualRef = useRef(null);
+  const [cams, setCams] = useState([]);
+  const [deviceId, setDeviceId] = useState('');
+  const [running, setRunning] = useState(false);
   const qrRef = useRef(null);
+  const manualRef = useRef(null);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUser(data.user));
   }, []);
 
-  useEffect(() => {
-    let stopped = false;
-
-    async function start() {
-      console.log('Starting scanner init…');
-      try {
-        setErrorMsg('');
-        const mod = await import('html5-qrcode');
-        const Html5Qrcode = mod.Html5Qrcode;
-
-        const mountId = 'qr-reader';
-        const mountEl = document.getElementById(mountId);
-        if (!mountEl) return;
-
-        try { await qrRef.current?.stop(); } catch (_) {}
-        try { await qrRef.current?.clear(); } catch (_) {}
-
-        const qr = new Html5Qrcode(mountId, true);
-        qrRef.current = qr;
-
-        const config = { fps: 10, qrbox: { width: 250, height: 250 } };
-
-        await qr.start(
-          { facingMode: 'environment' },
-          config,
-          async (decodedText) => {
-            if (stopped) return;
-            setResult('Checking...');
-            await handleDecoded(decodedText);
-          },
-          () => {}
-        );
-      } catch (e) {
-        console.error('Camera init failed RAW:', e);
-        let msg = e?.message || e?.name || String(e);
-        if (msg.includes('Permission') || msg.includes('NotAllowedError')) {
-          msg += ' — Check Chrome site permissions (Camera: Allow) and macOS Camera privacy.';
-        }
-        if (msg.includes('secure context') || msg.includes('getUserMedia')) {
-          msg += ' — On phones use HTTPS (ngrok/Vercel). On laptop, localhost is OK.';
-        }
-        setErrorMsg(msg);
-      }
+  async function listCameras() {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: true });
+      s.getTracks().forEach(t => t.stop());
+    } catch (_) {}
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const vs = devices.filter(d => d.kind === 'videoinput');
+    setCams(vs);
+    if (vs.length && !deviceId) {
+      const back = vs.find(v => /back|rear|environment/i.test(v.label));
+      setDeviceId((back || vs[0]).deviceId);
     }
+  }
 
-    if (typeof window !== 'undefined') start();
+  async function startCamera() {
+    setErrorMsg('');
+    setResult('');
+    try {
+      const mod = await import('html5-qrcode');
+      const { Html5Qrcode } = mod;
+      const mountId = 'qr-reader';
+      const el = document.getElementById(mountId);
+      if (!el) return;
 
-    return () => {
-      stopped = true;
-      (async () => {
-        try { await qrRef.current?.stop(); } catch (_) {}
-        try { await qrRef.current?.clear(); } catch (_) {}
-      })();
-    };
-  }, []);
+      try { await qrRef.current?.stop(); } catch {}
+      try { await qrRef.current?.clear(); } catch {}
+
+      if (!deviceId) await listCameras();
+      const chosen = deviceId || cams[0]?.deviceId;
+      if (!chosen) {
+        setErrorMsg('No camera available. Enable camera permissions.');
+        return;
+      }
+
+      const qr = new Html5Qrcode(mountId, true);
+      qrRef.current = qr;
+
+      await qr.start(
+        { deviceId: { exact: chosen } },
+        { fps: 10, qrbox: { width: 260, height: 260 } },
+        async (decodedText) => {
+          setResult('Checking...');
+          await handleDecoded(decodedText);
+        }
+      );
+      setRunning(true);
+    } catch (e) {
+      let msg = e?.message || e?.name || String(e);
+      if (/Permission|NotAllowed/i.test(msg)) msg += ' — allow camera in browser settings.';
+      if (/secure context|getUserMedia/i.test(msg)) msg += ' — must use HTTPS (Vercel is fine).';
+      setErrorMsg(msg);
+      setRunning(false);
+    }
+  }
+
+  async function stopCamera() {
+    try { await qrRef.current?.stop(); } catch {}
+    try { await qrRef.current?.clear(); } catch {}
+    setRunning(false);
+  }
 
   async function handleDecoded(text) {
     try {
@@ -111,11 +119,38 @@ export default function Checker() {
 
   return (
     <RequireRole role={['checker','admin']}>
-      <div style={{ padding: 20, fontFamily: 'sans-serif' }}>
+      <div style={{ padding: 16, fontFamily: 'sans-serif' }}>
         <h2>Scanner</h2>
-        <div id="qr-reader" style={{ width: 320, maxWidth: '100%', minHeight: 240, background: '#f7f7f7' }} />
+        <div style={{ marginBottom: 10 }}>
+          {!cams.length && (
+            <button onClick={listCameras} style={{ marginRight: 8 }}>
+              Find cameras
+            </button>
+          )}
+          {cams.length > 0 && (
+            <>
+              <select
+                value={deviceId}
+                onChange={e => setDeviceId(e.target.value)}
+                style={{ marginRight: 8 }}
+              >
+                {cams.map(c => (
+                  <option key={c.deviceId} value={c.deviceId}>
+                    {c.label || 'Camera'}
+                  </option>
+                ))}
+              </select>
+              {!running ? (
+                <button onClick={startCamera}>Start camera</button>
+              ) : (
+                <button onClick={stopCamera}>Stop camera</button>
+              )}
+            </>
+          )}
+        </div>
+        <div id="qr-reader" style={{ width: 320, maxWidth: '100%', minHeight: 260, background: '#f7f7f7' }} />
         {errorMsg && (
-          <div style={{ marginTop: 10, padding: 10, background: '#ffecec', color: '#a00', border: '1px solid #f5c2c2' }}>
+          <div style={{ marginTop: 10, padding: 10, background: '#ffecec', color: '#a00' }}>
             <b>Camera error:</b> {errorMsg}
           </div>
         )}
