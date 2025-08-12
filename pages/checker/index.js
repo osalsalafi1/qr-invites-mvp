@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { supabase } from '@/src/lib/supabaseClient'; // only for fetching guest_name (optional)
+import { supabase } from '@/src/lib/supabaseClient'; // only used to fetch guest_name (optional)
 import RequireRole from '@/components/RequireRole';
 
 /** =========================
@@ -52,17 +52,13 @@ const Button = ({ variant = 'primary', children, ...props }) => {
   };
   const variants = {
     primary: { background: BRAND.primary, color: BRAND.text },
-    subtle: { background: BRAND.surfaceAlt, color: BRAND.text },
-    accent: { background: BRAND.accent, color: BRAND.bg1 },
+    subtle:  { background: BRAND.surfaceAlt, color: BRAND.text },
+    accent:  { background: BRAND.accent, color: BRAND.bg1 },
   };
   return (
     <button
       {...props}
-      style={{
-        ...base,
-        ...variants[variant],
-        ...(props.style || {}),
-      }}
+      style={{ ...base, ...variants[variant], ...(props.style || {}) }}
       onMouseDown={(e) => (e.currentTarget.style.transform = 'scale(0.98)')}
       onMouseUp={(e) => (e.currentTarget.style.transform = 'scale(1)')}
     >
@@ -104,6 +100,8 @@ const Chip = ({ color, children }) => (
  *  ========================= */
 export default function Checker() {
   const [user, setUser] = useState(null);
+
+  // Camera & UI state
   const [cams, setCams] = useState([]);
   const [deviceId, setDeviceId] = useState('');
   const [running, setRunning] = useState(false);
@@ -131,11 +129,10 @@ export default function Checker() {
       }
     } catch {}
   }, []);
+
   useEffect(() => {
     scansRef.current = scans;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ scans }));
-    } catch {}
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ scans })); } catch {}
   }, [scans]);
 
   /** ---------- Auth (for name fetch only) ---------- */
@@ -166,60 +163,113 @@ export default function Checker() {
     }
   }
 
-  /** ---------- Camera ---------- */
+  /** ---------- Camera: hardened ---------- */
+  // 1) Safer camera listing with permissions prompt
   async function listCameras() {
+    setErrorMsg('');
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices) {
+      setErrorMsg('Camera API not available in this browser.');
+      return;
+    }
+
+    // Prompt once so labels appear on iOS
     try {
       const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      s.getTracks().forEach((t) => t.stop());
-    } catch {}
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const vs = devices.filter((d) => d.kind === 'videoinput');
-    setCams(vs);
-    if (vs.length && !deviceId) {
-      const back = vs.find((v) => /back|rear|environment/i.test(v.label));
-      setDeviceId((back || vs[0]).deviceId);
+      s.getTracks().forEach(t => t.stop());
+    } catch (e) {
+      // User may deny; continue to enumerate
+      console.warn('getUserMedia preview failed:', e);
+    }
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const vs = devices.filter(d => d.kind === 'videoinput');
+      setCams(vs);
+      if (vs.length && !deviceId) {
+        const back = vs.find(v => /back|rear|environment/i.test(v.label));
+        setDeviceId((back || vs[0]).deviceId);
+      }
+    } catch (e) {
+      console.error('enumerateDevices failed:', e);
+      setErrorMsg('Unable to list cameras. Check browser permissions.');
     }
   }
 
+  // 2) Super-defensive camera start
+  let starting = false;
   async function startCamera() {
     setErrorMsg('');
-    try {
-      const mod = await import('html5-qrcode');
-      const { Html5Qrcode } = mod;
-      const mountId = 'qr-reader';
+    if (starting || running) return;
+    starting = true;
 
+    try {
+      if (typeof window === 'undefined') throw new Error('Not in a browser context.');
+      if (!window.isSecureContext) {
+        throw new Error('This page must be loaded over HTTPS to access the camera.');
+      }
+      if (!document) throw new Error('Document is not available.');
+
+      const mountId = 'qr-reader';
+      const mountEl = document.getElementById(mountId);
+      if (!mountEl) throw new Error('#qr-reader element not found.');
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Camera API not supported in this browser.');
+      }
+
+      // Avoid double instances
       try { await qrRef.current?.stop(); } catch {}
       try { await qrRef.current?.clear(); } catch {}
 
-      if (!deviceId) await listCameras();
-      const chosen = deviceId || cams[0]?.deviceId;
-      if (!chosen) {
-        setErrorMsg('No camera available. Enable camera permission.');
-        return;
+      // Dynamic import
+      let Html5Qrcode;
+      try {
+        const mod = await import('html5-qrcode');
+        Html5Qrcode = mod.Html5Qrcode;
+      } catch (e) {
+        console.error('Failed to import html5-qrcode:', e);
+        throw new Error('Failed to load QR scanner library.');
       }
 
-      const qr = new Html5Qrcode(mountId, true);
+      // Ensure we have a target device OR fallback to facingMode
+      let constraints;
+      const chosenId = deviceId || cams[0]?.deviceId || null;
+      if (chosenId) {
+        constraints = { deviceId: { exact: chosenId } };
+      } else {
+        // Fallback – many iOS devices work better with facingMode
+        constraints = { facingMode: { exact: 'environment' } };
+      }
+
+      const qr = new Html5Qrcode(mountId, /* verbose */ true);
       qrRef.current = qr;
 
       await qr.start(
-        { deviceId: { exact: chosen } },
+        constraints,
         { fps: 10, qrbox: { width: 280, height: 280 } },
         async (decodedText) => {
-          await stopCamera();
-          await handleDecoded(decodedText);
+          try {
+            await stopCamera();           // stop after first scan
+            await handleDecoded(decodedText);
+          } catch (scanErr) {
+            console.error('Decode handler crashed:', scanErr);
+            setErrorMsg('Scanned, but something went wrong while processing.');
+          }
         },
-        () => {}
+        () => {} // onScanFailure — keep quiet to avoid UI spam
       );
+
       setRunning(true);
     } catch (e) {
-      let msg = e?.message || e?.name || String(e);
-      if (/Permission|NotAllowed/i.test(msg)) msg += ' — allow camera in site settings.';
-      if (/secure context|getUserMedia/i.test(msg)) msg += ' — use HTTPS (Vercel).';
-      setErrorMsg(msg);
+      console.error('startCamera error:', e);
+      setErrorMsg(e?.message || 'Camera failed to start.');
       setRunning(false);
+    } finally {
+      starting = false;
     }
   }
 
+  // 3) Safe stop (idempotent)
   async function stopCamera() {
     try { await qrRef.current?.stop(); } catch {}
     try { await qrRef.current?.clear(); } catch {}
@@ -228,21 +278,27 @@ export default function Checker() {
 
   /** ---------- Scanning ---------- */
   async function handleDecoded(text) {
-    const now = new Date().toLocaleString();
-    const id = normalizeId(text);
+    try {
+      const now = new Date().toLocaleString();
+      const id = normalizeId(text);
 
-    if (!id) {
-      addRow({ id: '-', name: 'Invalid QR', time: now, status: 'INVALID' });
-      showToast('Invalid QR', 'danger');
-      return;
+      if (!id) {
+        addRow({ id: '-', name: 'Invalid QR', time: now, status: 'INVALID' });
+        showToast('Invalid QR', 'danger');
+        return;
+      }
+
+      // Decide using ONLY the current session table
+      const duplicate = seenRef.current.has(id) || scansRef.current.some((r) => r.id === id);
+      const name = await fetchNameIfPossible(id);
+
+      addRow({ id, name, time: now, status: duplicate ? 'ALREADY' : 'OK' });
+      showToast(duplicate ? `Already in table — ${name}` : `Checked — ${name}`, duplicate ? 'warn' : 'success');
+      seenRef.current.add(id);
+    } catch (e) {
+      console.error('handleDecoded crashed:', e);
+      setErrorMsg('Invalid QR content or internal error.');
     }
-
-    const duplicate = seenRef.current.has(id) || scansRef.current.some((r) => r.id === id);
-    const name = await fetchNameIfPossible(id);
-
-    addRow({ id, name, time: now, status: duplicate ? 'ALREADY' : 'OK' });
-    showToast(duplicate ? `Already in table — ${name}` : `Checked — ${name}`, duplicate ? 'warn' : 'success');
-    seenRef.current.add(id);
   }
 
   function addRow(row) {
@@ -263,7 +319,7 @@ export default function Checker() {
     setTimeout(() => setToast(null), 1600);
   }
 
-  /** ---------- UI ---------- */
+  /** ---------- UI bits ---------- */
   const StatusChip = ({ status }) => {
     if (status === 'OK') return <Chip color={BRAND.success}>First in table</Chip>;
     if (status === 'ALREADY') return <Chip color={BRAND.warn}>Already in table</Chip>;
@@ -290,16 +346,12 @@ export default function Checker() {
               <div
                 aria-hidden
                 style={{
-                  width: 44,
-                  height: 44,
-                  borderRadius: 12,
+                  width: 44, height: 44, borderRadius: 12,
                   background: `linear-gradient(180deg, ${BRAND.primary} 0%, ${BRAND.primaryHover} 100%)`,
-                  display: 'grid',
-                  placeItems: 'center',
+                  display: 'grid', placeItems: 'center',
                   boxShadow: '0 8px 18px rgba(0,0,0,0.35)',
                   border: `1px solid ${BRAND.border}`,
-                  fontWeight: 900,
-                  letterSpacing: '0.4px',
+                  fontWeight: 900, letterSpacing: '0.4px',
                 }}
               >
                 YM
@@ -308,13 +360,9 @@ export default function Checker() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span
                     style={{
-                      fontSize: 12,
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.12em',
-                      padding: '4px 10px',
-                      borderRadius: 999,
-                      background: BRAND.surfaceAlt,
-                      border: `1px solid ${BRAND.border}`,
+                      fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.12em',
+                      padding: '4px 10px', borderRadius: 999,
+                      background: BRAND.surfaceAlt, border: `1px solid ${BRAND.border}`,
                       color: BRAND.textMuted,
                     }}
                   >
@@ -326,6 +374,10 @@ export default function Checker() {
                 <p style={{ margin: '6px 0 0', color: BRAND.textMuted, fontSize: 13 }}>
                   Scan a QR, we’ll stop the camera and log it below. If the same code appears again in this session, it’s marked as already used.
                 </p>
+                {/* version banner so you can confirm deploy */}
+                <div style={{ marginTop: 8, fontSize: 12, color: BRAND.accent, letterSpacing: '0.08em' }}>
+                  UI build: YA-MARHABA v2025-08-12-01
+                </div>
               </div>
             </div>
           </Card>
@@ -357,13 +409,9 @@ export default function Checker() {
                   </select>
 
                   {!running ? (
-                    <Button onClick={startCamera}>
-                      ▶️ Start camera
-                    </Button>
+                    <Button onClick={startCamera}>▶️ Start camera</Button>
                   ) : (
-                    <Button variant="subtle" onClick={stopCamera}>
-                      ⏹ Stop camera
-                    </Button>
+                    <Button variant="subtle" onClick={stopCamera}>⏹ Stop camera</Button>
                   )}
                 </>
               )}
@@ -501,15 +549,10 @@ export default function Checker() {
           >
             <span
               style={{
-                width: 10,
-                height: 10,
-                borderRadius: 999,
-                background:
-                  toast.type === 'success'
-                    ? BRAND.success
-                    : toast.type === 'warn'
-                    ? BRAND.warn
-                    : BRAND.danger,
+                width: 10, height: 10, borderRadius: 999,
+                background: toast.type === 'success' ? BRAND.success
+                  : toast.type === 'warn' ? BRAND.warn
+                  : BRAND.danger,
               }}
             />
             <span style={{ fontWeight: 700 }}>{toast.message}</span>
