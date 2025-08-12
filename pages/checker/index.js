@@ -1,9 +1,9 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { supabase } from '@/src/lib/supabaseClient'; // only to fetch display name (optional)
+import { supabase } from '@/src/lib/supabaseClient';
 import RequireRole from '@/components/RequireRole';
 
-const STORAGE_KEY = 'qr_checker_scans_v1'; // change if you ever want to force a fresh session
+const STORAGE_KEY = 'qr_checker_scans_v1';
 
 export default function Checker() {
   const [user, setUser] = useState(null);
@@ -11,13 +11,13 @@ export default function Checker() {
   const [cams, setCams] = useState([]);
   const [deviceId, setDeviceId] = useState('');
   const [running, setRunning] = useState(false);
-  const [scans, setScans] = useState([]); // rows: {id, name, time, status}
-  const scansRef = useRef(scans);         // keep latest for handlers
-  const seenRef = useRef(new Set());      // normalized IDs seen in THIS persisted session
+  const [scans, setScans] = useState([]);
+  const [lastStatus, setLastStatus] = useState(null); // For green/red message
+  const scansRef = useRef(scans);
+  const seenRef = useRef(new Set());
   const qrRef = useRef(null);
   const manualRef = useRef(null);
 
-  // Load persisted session (table + seen IDs)
   useEffect(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -29,34 +29,30 @@ export default function Checker() {
           seenRef.current = new Set((parsed.scans || []).map(r => r.id));
         }
       }
-    } catch { /* ignore corrupt storage */ }
+    } catch {}
   }, []);
 
-  // Persist whenever scans change
   useEffect(() => {
     scansRef.current = scans;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ scans }));
-    } catch { /* storage might be full or disabled */ }
+    } catch {}
   }, [scans]);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUser(data.user)).catch(() => {});
   }, []);
 
-  // Normalize any scanned text to a canonical ID
   function normalizeId(text) {
     try {
       const trimmed = (text || '').trim();
       const url = new URL(trimmed);
-      let path = url.pathname || '';
-      const parts = path.split('/').filter(Boolean);
+      const parts = url.pathname.split('/').filter(Boolean);
       let id = '';
       const iIndex = parts.findIndex(x => x.toLowerCase() === 'i');
       if (iIndex >= 0 && parts[iIndex + 1]) id = parts[iIndex + 1];
       else id = parts[parts.length - 1] || '';
-      id = decodeURIComponent(id).trim();
-      return id.toLowerCase();
+      return decodeURIComponent(id).trim().toLowerCase();
     } catch {
       return (text || '').trim().toLowerCase();
     }
@@ -64,9 +60,9 @@ export default function Checker() {
 
   async function listCameras() {
     try {
-      const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      const s = await navigator.mediaDevices.getUserMedia({ video: true });
       s.getTracks().forEach(t => t.stop());
-    } catch (_) {}
+    } catch {}
     const devices = await navigator.mediaDevices.enumerateDevices();
     const vs = devices.filter(d => d.kind === 'videoinput');
     setCams(vs);
@@ -78,6 +74,7 @@ export default function Checker() {
 
   async function startCamera() {
     setErrorMsg('');
+    setLastStatus(null);
     try {
       const mod = await import('html5-qrcode');
       const { Html5Qrcode } = mod;
@@ -105,8 +102,7 @@ export default function Checker() {
         async (decodedText) => {
           await stopCamera();
           await handleDecoded(decodedText);
-        },
-        () => {}
+        }
       );
       setRunning(true);
     } catch (e) {
@@ -124,27 +120,22 @@ export default function Checker() {
     setRunning(false);
   }
 
-  // Decide using ONLY what's already in the persisted table for this device/session
   async function handleDecoded(text) {
     const now = new Date().toLocaleString();
     const id = normalizeId(text);
 
     if (!id) {
       setScans(prev => [{ id: '-', name: 'Invalid QR', time: now, status: 'INVALID' }, ...prev]);
+      setLastStatus('INVALID');
       return;
     }
 
-    // Check against what’s already in the table (and seenRef)
     const already = seenRef.current.has(id) || scansRef.current.some(r => r.id === id);
-
-    // Optional: fetch display name from DB (read-only)
     const name = await fetchNameIfPossible(id);
 
-    // Record row
     setScans(prev => [{ id, name, time: now, status: already ? 'ALREADY' : 'OK' }, ...prev]);
-
-    // Remember this id as seen (so future scans—even after refresh—still show ALREADY)
     seenRef.current.add(id);
+    setLastStatus(already ? 'ALREADY' : 'OK');
   }
 
   async function fetchNameIfPossible(id) {
@@ -188,20 +179,20 @@ export default function Checker() {
 
   return (
     <RequireRole role={['checker','admin']}>
-      <div style={{ padding: 16, fontFamily: 'sans-serif', maxWidth: 820, margin: '0 auto' }}>
-        <h2>Scanner</h2>
+      <div style={{ padding: 16, fontFamily: 'sans-serif', maxWidth: 820, margin: '0 auto', background: '#3E2723', color: '#fff', borderRadius: 8 }}>
+        <h1 style={{ textAlign: 'center', fontSize: 28, marginBottom: 20 }}>Ya Mar7aba - Scanner</h1>
 
-        {/* Camera controls */}
-        <div style={{ marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {/* Start/Stop Camera */}
+        <div style={{ marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
           {!cams.length && (
-            <button onClick={listCameras}>Find cameras</button>
+            <button onClick={listCameras} style={{ padding: '12px 20px', fontSize: 18, background: '#8D6E63', color: '#fff', border: 'none', borderRadius: 6 }}>Find cameras</button>
           )}
           {cams.length > 0 && (
             <>
               <select
                 value={deviceId}
                 onChange={e => setDeviceId(e.target.value)}
-                style={{ minWidth: 220 }}
+                style={{ minWidth: 220, padding: 8, borderRadius: 6 }}
               >
                 {cams.map(c => (
                   <option key={c.deviceId} value={c.deviceId}>
@@ -210,68 +201,70 @@ export default function Checker() {
                 ))}
               </select>
               {!running ? (
-                <button onClick={startCamera}>Start camera</button>
+                <button onClick={startCamera} style={{ padding: '14px 28px', fontSize: 20, background: '#6D4C41', color: '#fff', border: 'none', borderRadius: 8 }}>▶ Start Scanner</button>
               ) : (
-                <button onClick={stopCamera}>Stop camera</button>
+                <button onClick={stopCamera} style={{ padding: '14px 28px', fontSize: 20, background: '#B71C1C', color: '#fff', border: 'none', borderRadius: 8 }}>■ Stop Scanner</button>
               )}
             </>
           )}
         </div>
 
-        <div id="qr-reader" style={{ width: 360, maxWidth: '100%', minHeight: 260, background: '#f7f7f7' }} />
+        {/* Scanner Area */}
+        <div id="qr-reader" style={{ width: 360, maxWidth: '100%', minHeight: 260, background: '#5D4037', margin: '0 auto', borderRadius: 8 }} />
 
+        {/* Status Message */}
+        {lastStatus === 'OK' && (
+          <div style={{ background: '#2E7D32', padding: 12, marginTop: 10, borderRadius: 6, textAlign: 'center' }}>✅ First Time Scan - Welcome!</div>
+        )}
+        {lastStatus === 'ALREADY' && (
+          <div style={{ background: '#C62828', padding: 12, marginTop: 10, borderRadius: 6, textAlign: 'center' }}>❌ Already Scanned</div>
+        )}
+
+        {/* Error */}
         {errorMsg && (
-          <div style={{ marginTop: 10, padding: 10, background: '#ffecec', color: '#a00', border: '1px solid #f5c2c2' }}>
+          <div style={{ marginTop: 10, padding: 10, background: '#FFCDD2', color: '#B71C1C', borderRadius: 6 }}>
             <b>Camera error:</b> {errorMsg}
           </div>
         )}
 
         {/* Manual input */}
         <div style={{ marginTop: 14 }}>
-          <h4>Manual add (invite UUID or full URL)</h4>
-          <input
-            ref={manualRef}
-            placeholder="550e8400-e29b-41d4-a716-446655440000  OR  https://.../i/UUID"
-            style={{ width: 360, maxWidth: '100%' }}
-          />
-        <button onClick={manualAdd} style={{ marginInlineStart: 8 }}>Add to table</button>
+          <h4>Manual add</h4>
+          <input ref={manualRef} placeholder="UUID or QR URL" style={{ width: 260, padding: 8, borderRadius: 6 }} />
+          <button onClick={manualAdd} style={{ marginInlineStart: 8, padding: '8px 14px', background: '#8D6E63', color: '#fff', border: 'none', borderRadius: 6 }}>Add</button>
         </div>
 
-        {/* Session table (persisted in localStorage) */}
+        {/* Table */}
         <div style={{ marginTop: 20 }}>
           <h3>Scans (this device)</h3>
           <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr style={{ textAlign: 'left', borderBottom: '1px solid #e5e7eb' }}>
-                  <th style={{ padding: '8px 6px' }}>#</th>
-                  <th style={{ padding: '8px 6px' }}>Guest</th>
-                  <th style={{ padding: '8px 6px' }}>Time</th>
-                  <th style={{ padding: '8px 6px' }}>Status</th>
-                  <th style={{ padding: '8px 6px' }}>ID</th>
+            <table style={{ width: '100%', borderCollapse: 'collapse', background: '#4E342E', borderRadius: 8, overflow: 'hidden' }}>
+              <thead style={{ background: '#3E2723' }}>
+                <tr>
+                  <th style={{ padding: 8 }}>#</th>
+                  <th style={{ padding: 8 }}>Guest</th>
+                  <th style={{ padding: 8 }}>Time</th>
+                  <th style={{ padding: 8 }}>Status</th>
+                  <th style={{ padding: 8 }}>ID</th>
                 </tr>
               </thead>
               <tbody>
                 {scans.length === 0 ? (
-                  <tr><td colSpan={5} style={{ padding: 12, color: '#6b7280' }}>No scans yet</td></tr>
+                  <tr><td colSpan={5} style={{ padding: 12, textAlign: 'center', color: '#BCAAA4' }}>No scans yet</td></tr>
                 ) : (
                   scans.map((r, idx) => (
-                    <tr key={`${r.id}-${idx}`} style={{ borderBottom: '1px solid #f3f4f6' }}>
-                      <td style={{ padding: '8px 6px' }}>{scans.length - idx}</td>
-                      <td style={{ padding: '8px 6px' }}>{r.name}</td>
-                      <td style={{ padding: '8px 6px' }}>{r.time}</td>
-                      <td style={{ padding: '8px 6px' }}><Dot status={r.status} /></td>
-                      <td style={{ padding: '8px 6px', fontFamily: 'monospace' }}>{r.id}</td>
+                    <tr key={`${r.id}-${idx}`} style={{ borderBottom: '1px solid #6D4C41' }}>
+                      <td style={{ padding: 8 }}>{scans.length - idx}</td>
+                      <td style={{ padding: 8 }}>{r.name}</td>
+                      <td style={{ padding: 8 }}>{r.time}</td>
+                      <td style={{ padding: 8 }}><Dot status={r.status} /></td>
+                      <td style={{ padding: 8, fontFamily: 'monospace' }}>{r.id}</td>
                     </tr>
                   ))
                 )}
               </tbody>
             </table>
           </div>
-          <p style={{ color: '#6b7280', fontSize: 13, marginTop: 8 }}>
-            * Data is stored locally in this browser (localStorage). Refreshing the page keeps the table;
-            clearing site data will reset it.
-          </p>
         </div>
       </div>
     </RequireRole>
