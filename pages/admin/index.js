@@ -77,21 +77,23 @@ export default function Admin() {
   const [designFile, setDesignFile] = useState(null);
   const [designUrl, setDesignUrl] = useState(null);
 
-  // QR placement config (percentages so it adapts to any design size)
-  // center X/Y in %, and size as % of image width
+  // Global QR placement config (per event) — percentages so it adapts to any design size
+  // xPct/yPct are the center point in %, sizePct is % of image width
   const [qrCfg, setQrCfg] = useState({ xPct: 50, yPct: 85, sizePct: 25, transparent: true });
   const previewRef = useRef(null);
-  const designImgRef = useRef(null);
 
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
-  const DESIGN_BUCKET = 'invitation-designs'; // make sure this exists in Supabase Storage
+  const DESIGN_BUCKET = 'invitation-designs'; // Ensure this bucket exists (public)
 
+  // Auth
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUser(data.user));
   }, []);
 
+  // Load events
   useEffect(() => { fetchEvents(); }, []);
 
+  // When switching events, load invites/design/cfg
   useEffect(() => {
     if (selectedEventId) {
       loadInvites(selectedEventId);
@@ -137,19 +139,20 @@ export default function Admin() {
       .from(DESIGN_BUCKET)
       .getPublicUrl(`${eventId}/design.png`);
     setDesignUrl(data?.publicUrl || null);
-    // preview will re-render when image loads
   }
 
+  // Persist/restore QR config per event in localStorage
   function loadQrCfg(eventId) {
     try {
       const raw = localStorage.getItem(`qr_cfg_${eventId}`);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object') setQrCfg({ ...qrCfg, ...parsed });
+        if (parsed && typeof parsed === 'object') {
+          setQrCfg(prev => ({ ...prev, ...parsed }));
+        }
       }
-    } catch {}
+    } catch { /* ignore */ }
   }
-
   function saveQrCfg() {
     if (!selectedEventId) return;
     localStorage.setItem(`qr_cfg_${selectedEventId}`, JSON.stringify(qrCfg));
@@ -257,10 +260,12 @@ export default function Admin() {
   async function renderPreview() {
     const canvas = previewRef.current;
     if (!canvas || !designUrl) return;
-    const ctx = canvas.getContext('2d');
 
+    const ctx = canvas.getContext('2d');
     const img = await loadImage(designUrl);
-    const maxW = 520; // preview size (not full res)
+
+    // Scale down to preview width (keep aspect)
+    const maxW = 520;
     const scale = img.width > maxW ? maxW / img.width : 1;
     const w = Math.round(img.width * scale);
     const h = Math.round(img.height * scale);
@@ -278,7 +283,7 @@ export default function Admin() {
     const x = cx - Math.floor(qrSize / 2);
     const y = cy - Math.floor(qrSize / 2);
 
-    // draw a translucent box to show placement
+    // light overlay box to show placement
     ctx.save();
     ctx.strokeStyle = '#00E676';
     ctx.lineWidth = 2;
@@ -286,7 +291,7 @@ export default function Admin() {
     ctx.fillRect(x, y, qrSize, qrSize);
     ctx.strokeRect(x, y, qrSize, qrSize);
 
-    // draw a sample QR on preview (transparent bg if chosen)
+    // preview QR (transparent if chosen)
     const previewQr = await QRCode.toDataURL('SAMPLE', {
       width: qrSize,
       margin: 0,
@@ -294,10 +299,35 @@ export default function Admin() {
     });
     const qrImg = await loadImage(previewQr);
     ctx.drawImage(qrImg, x, y, qrSize, qrSize);
+
+    // preview Arabic name under QR
+    const guestName = 'الضيف';
+    const maxTextWidth = Math.floor(qrSize * 1.05);
+    let fontSize = Math.max(14, Math.floor(qrSize * 0.18));
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.direction = 'rtl';
+    ctx.fillStyle = '#000';
+
+    while (fontSize >= 14) {
+      ctx.font = `bold ${fontSize}px Tahoma, Arial, sans-serif`;
+      if (ctx.measureText(guestName).width <= maxTextWidth) break;
+      fontSize -= 2;
+    }
+
+    let textY = y + qrSize + Math.round(qrSize * 0.08);
+    const marginBottom = Math.round(qrSize * 0.04);
+    const maxY = canvas.height - marginBottom - fontSize;
+    if (textY > maxY) textY = maxY;
+
+    ctx.shadowColor = 'rgba(0,0,0,0.25)';
+    ctx.shadowBlur = 2;
+    ctx.shadowOffsetY = 1;
+    ctx.fillText(guestName, cx, textY);
     ctx.restore();
   }
 
-  // ---------- DOWNLOAD INVITATIONS USING CONFIG ----------
+  // ---------- GENERATE INVITATIONS ----------
   async function downloadQRCodes() {
     if (!designUrl) {
       return alert('Upload a design first, then set QR position/size.');
@@ -307,11 +337,13 @@ export default function Admin() {
 
     for (const iv of invites || []) {
       const qrUrl = `${baseUrl}/i/${iv.id}`;
+      const guestName = (iv.guest_name && String(iv.guest_name).trim()) || 'الضيف';
 
-      // Build QR with transparent bg if chosen
+      // Build QR with selected background (transparent or white)
+      const qrSizePx = Math.floor((qrCfg.sizePct / 100) * designImg.width);
       const qrDataUrl = await QRCode.toDataURL(qrUrl, {
-        width: Math.floor((qrCfg.sizePct / 100) * designImg.width),
-        margin: 0, // IMPORTANT: no white margin
+        width: qrSizePx,
+        margin: 0, // remove extra white margin
         color: { dark: '#000000', light: qrCfg.transparent ? '#0000' : '#FFFFFF' },
       });
 
@@ -323,21 +355,48 @@ export default function Admin() {
       // draw design
       ctx.drawImage(designImg, 0, 0);
 
-      // compute QR rect
-      const qrSize = Math.floor((qrCfg.sizePct / 100) * designImg.width);
+      // compute QR rect from cfg (center point x/y + size)
+      const qrSize = qrSizePx;
       const cx = Math.floor((qrCfg.xPct / 100) * designImg.width);
       const cy = Math.floor((qrCfg.yPct / 100) * designImg.height);
       const x = cx - Math.floor(qrSize / 2);
       const y = cy - Math.floor(qrSize / 2);
 
+      // draw QR
       const qrImg = await loadImage(qrDataUrl);
       ctx.drawImage(qrImg, x, y, qrSize, qrSize);
+
+      // Arabic name under QR (auto-fit)
+      const maxTextWidth = Math.floor(qrSize * 1.05);
+      let fontSize = Math.max(14, Math.floor(qrSize * 0.18));
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.direction = 'rtl';
+      ctx.fillStyle = '#000';
+
+      while (fontSize >= 14) {
+        ctx.font = `bold ${fontSize}px Tahoma, Arial, sans-serif`;
+        if (ctx.measureText(guestName).width <= maxTextWidth) break;
+        fontSize -= 2;
+      }
+
+      let textY = y + qrSize + Math.round(qrSize * 0.08);
+      const marginBottom = Math.round(qrSize * 0.04);
+      const maxY = canvas.height - marginBottom - fontSize;
+      if (textY > maxY) textY = maxY;
+
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.25)';
+      ctx.shadowBlur = 2;
+      ctx.shadowOffsetY = 1;
+      ctx.fillText(guestName, cx, textY);
+      ctx.restore();
 
       // download
       const outUrl = canvas.toDataURL('image/png');
       const a = document.createElement('a');
       a.href = outUrl;
-      a.download = `${(iv.guest_name || 'Guest').replace(/[\\/:*?"<>|]/g, '_')}_${iv.code || ''}.png`;
+      a.download = `${guestName.replace(/[\\/:*?"<>|]/g, '_')}_${iv.code || ''}.png`;
       a.click();
 
       await new Promise((r) => setTimeout(r, 120));
@@ -426,7 +485,7 @@ export default function Admin() {
                     <canvas ref={previewRef} style={{ width: '100%', borderRadius: 12, border: `1px solid ${BRAND.border}`, background: '#000' }} />
                   </div>
 
-                  <div style={{ display: 'grid', gap: 10, gridTemplateColumns: '1fr 1fr' }}>
+                  <div style={{ display: 'grid', gap: 12, gridTemplateColumns: '1fr 1fr' }}>
                     <div>
                       <label style={label}>QR Horizontal (X%)</label>
                       <input
@@ -510,7 +569,7 @@ export default function Admin() {
                   Download CSV (links)
                 </button>
                 <button style={btn()} onClick={downloadQRCodes} disabled={!invites.length || !designUrl}>
-                  Generate Invitations (with QR)
+                  Generate Invitations (with QR + Arabic name)
                 </button>
               </div>
             </section>
