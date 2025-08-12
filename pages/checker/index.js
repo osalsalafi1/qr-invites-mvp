@@ -10,7 +10,7 @@ const BRAND = {
   primary: '#6B4226', primaryHover: '#7E4B2B', accent: '#B0825C',
   success: '#22C55E', warn: '#F59E0B', danger: '#EF4444',
 };
-const STORAGE_KEY = 'ya_marhaba_checker_scans_v3';
+const STORAGE_KEY = 'ya_marhaba_checker_scans_v4';
 
 const Card = ({ children, style }) => (
   <div style={{
@@ -61,11 +61,9 @@ export default function Checker(){
   const qrRef=useRef(null);
   const manualRef=useRef(null);
 
-  // Camera Test state
-  const [testActive,setTestActive]=useState(false);
-  const testVideoRef=useRef(null);
-  const testStreamRef=useRef(null);
-  const [testMsg,setTestMsg]=useState('');
+  // guards to avoid race conditions causing client-side exceptions
+  const processingRef = useRef(false);  // one decodedText at a time
+  const stoppingRef = useRef(false);    // one stop/clear at a time
 
   // Load persisted table
   useEffect(()=>{
@@ -133,7 +131,7 @@ export default function Checker(){
     }
   }
 
-  // ---------- Start camera (FIXED: pass cameraConfig directly) ----------
+  // ---------- Start camera (pass cameraConfig directly; try fallbacks) ----------
   let starting=false;
   async function startCamera(){
     setErrorMsg('');
@@ -147,12 +145,8 @@ export default function Checker(){
       if(!el) throw new Error('#qr-reader element not found.');
       if(!navigator.mediaDevices?.getUserMedia) throw new Error('Camera API not supported.');
 
-      // stop any test stream
-      await stopTest();
-
       // clean old session
-      try{ await qrRef.current?.stop(); }catch{}
-      try{ await qrRef.current?.clear(); }catch{}
+      await safeClear();
 
       // import lib
       let Html5Qrcode;
@@ -162,32 +156,41 @@ export default function Checker(){
 
       const qr=new Html5Qrcode(mountId,true); qrRef.current=qr;
 
-      // IMPORTANT: Html5Qrcode.start expects the cameraConfig directly, NOT wrapped in { video: ... }
+      // IMPORTANT: pass cameraConfig directly
       const tryConfigs = [
         deviceId ? { deviceId: { exact: deviceId } } : null,
         { facingMode: 'environment' },
         { facingMode: 'user' } // last resort
       ].filter(Boolean);
 
-      let started=false, lastErr=null;
+      let startedOk=false, lastErr=null;
       for(const cameraConfig of tryConfigs){
         try{
           await qr.start(
-            cameraConfig,                              // <-- fixed
+            cameraConfig,
             { fps: 10, qrbox: { width: 280, height: 280 } },
             async (decodedText)=>{
-              try{ await stopCamera(); await handleDecoded(decodedText); }
-              catch(scanErr){ console.error('decode error:',scanErr); setErrorMsg('Scanned, but processing failed.'); }
+              if (processingRef.current) return; // ignore rapid double fires
+              processingRef.current = true;
+              try{
+                await stopCamera();            // stop FIRST, then process
+                await handleDecoded(decodedText);
+              }catch(scanErr){
+                console.error('decode error:',scanErr);
+                setErrorMsg('Scanned, but processing failed.');
+              }finally{
+                processingRef.current = false;
+              }
             },
-            ()=>{}
+            ()=>{} // onScanFailure: keep quiet
           );
-          started=true; break;
+          startedOk=true; break;
         }catch(e){
           console.warn('qr.start failed with config', cameraConfig, e);
           lastErr=e;
         }
       }
-      if(!started){
+      if(!startedOk){
         throw new Error(lastErr?.message || 'Camera failed to start with all fallbacks.');
       }
       setRunning(true);
@@ -198,45 +201,34 @@ export default function Checker(){
     }finally{ starting=false; }
   }
 
+  // ---------- Safe stop/clear (prevents removeChild / play() abort errors) ----------
   async function stopCamera(){
-    try{ await qrRef.current?.stop(); }catch{}
-    try{ await qrRef.current?.clear(); }catch{}
-    setRunning(false);
+    if (stoppingRef.current) return;
+    stoppingRef.current = true;
+    try{
+      const qr = qrRef.current;
+      if (!qr) { setRunning(false); return; }
+
+      try { await qr.stop(); } catch(e){ console.warn('qr.stop issue:', e); }
+      // Let video detach/settle before clearing DOM
+      await new Promise(r => setTimeout(r, 50));
+      try { await qr.clear(); } catch(e){ console.warn('qr.clear issue:', e); }
+
+      setRunning(false);
+    } finally {
+      stoppingRef.current = false;
+    }
   }
 
-  // ---------- Camera Test (plain getUserMedia) ----------
-  async function startTest(){
-    setTestMsg('');
-    setErrorMsg('');
+  // Used by startCamera before starting a new instance
+  async function safeClear(){
     try{
-      if(!window.isSecureContext) throw new Error('Use HTTPS to access camera.');
-      if(!navigator.mediaDevices?.getUserMedia) throw new Error('Camera API not supported.');
-      const videoConstraints = deviceId
-        ? { deviceId: { exact: deviceId } }
-        : { facingMode: { exact: 'environment' } };
-      const stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
-      testStreamRef.current = stream;
-      if(testVideoRef.current){
-        testVideoRef.current.srcObject = stream;
-        await testVideoRef.current.play();
+      if(qrRef.current){
+        try{ await qrRef.current.stop(); }catch{}
+        await new Promise(r => setTimeout(r, 50));
+        try{ await qrRef.current.clear(); }catch{}
       }
-      setTestActive(true);
-      setTestMsg('Camera Test running. If you see video, camera permissions are OK.');
-    }catch(e){
-      console.error('Camera Test failed:', e);
-      setTestMsg('Camera Test error: ' + (e?.message || String(e)));
-    }
-  }
-  async function stopTest(){
-    try{
-      testStreamRef.current?.getTracks()?.forEach(t=>t.stop());
-      testStreamRef.current=null;
     }catch{}
-    if(testVideoRef.current){
-      testVideoRef.current.pause();
-      testVideoRef.current.srcObject=null;
-    }
-    setTestActive(false);
   }
 
   // ---------- Scanning ----------
@@ -270,7 +262,6 @@ export default function Checker(){
     setTimeout(()=>setToast(null),1600);
   }
 
-  // UI helpers
   const StatusChip=({status})=>{
     if(status==='OK') return <Chip color={BRAND.success}>First in table</Chip>;
     if(status==='ALREADY') return <Chip color={BRAND.warn}>Already in table</Chip>;
@@ -312,7 +303,7 @@ export default function Checker(){
                   Start camera → scan → we stop the camera and log it below. Repeat scans in this device session show “Already in table”.
                 </p>
                 <div style={{marginTop:8, fontSize:12, color:BRAND.accent, letterSpacing:'0.08em'}}>
-                  UI build: YA-MARHABA v2025-08-12-03
+                  UI build: YA-MARHABA v4
                 </div>
               </div>
             </div>
@@ -362,29 +353,6 @@ export default function Checker(){
                 <b>Camera error:</b> {errorMsg}
               </div>
             )}
-          </Card>
-
-          {/* Camera Test */}
-          <Card style={{marginBottom:16}}>
-            <h3 style={{margin:0, marginBottom:10}}>Camera Test (diagnostic)</h3>
-            <div style={{display:'flex', gap:10, flexWrap:'wrap', alignItems:'center'}}>
-              {!testActive ? (
-                <Button variant="subtle" onClick={startTest}>▶️ Start test preview</Button>
-              ) : (
-                <Button variant="subtle" onClick={stopTest}>⏹ Stop test</Button>
-              )}
-              <span style={{color:BRAND.textMuted, fontSize:12}}>
-                If you can see video here, permissions & camera work.
-              </span>
-            </div>
-            <div style={{
-              marginTop:12, border:`1px dashed ${BRAND.border}`, borderRadius:12,
-              minHeight:200, display:'grid', placeItems:'center', background:BRAND.surfaceAlt
-            }}>
-              <video ref={testVideoRef} playsInline muted style={{width:'100%', maxWidth:420, borderRadius:12}}/>
-              {!testActive && <span style={{color:BRAND.textMuted, fontSize:12}}>No test stream</span>}
-            </div>
-            {testMsg && <div style={{marginTop:8, color:BRAND.textMuted, fontSize:12}}>{testMsg}</div>}
           </Card>
 
           {/* Manual Add */}
