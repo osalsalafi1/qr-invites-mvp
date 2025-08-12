@@ -12,6 +12,48 @@ function randCode(len = 8) {
   return out;
 }
 
+// ---- Theme (same palette as checker) ----
+const BRAND = {
+  bg: '#3E2723',
+  card: '#4E342E',
+  surface: '#5D4037',
+  accent: '#8D6E63',
+  primary: '#6D4C41',
+  danger: '#B71C1C',
+  text: '#FFF',
+  textMuted: '#D7CCC8',
+  border: '#6D4C41',
+  inputBg: '#5D4037',
+  inputBorder: '#795548',
+};
+
+const btn = (bg = BRAND.primary) => ({
+  background: bg,
+  color: '#fff',
+  border: 'none',
+  borderRadius: 10,
+  padding: '12px 18px',
+  fontSize: 16,
+  cursor: 'pointer',
+});
+const input = {
+  width: '100%',
+  padding: '10px 12px',
+  background: BRAND.inputBg,
+  border: `1px solid ${BRAND.inputBorder}`,
+  borderRadius: 10,
+  color: BRAND.text,
+  outline: 'none',
+};
+const label = { display: 'block', marginBottom: 6, color: BRAND.textMuted, fontSize: 13 };
+const section = {
+  background: BRAND.card,
+  border: `1px solid ${BRAND.border}`,
+  borderRadius: 16,
+  padding: 16,
+};
+const h3 = { margin: 0, marginBottom: 12, fontSize: 18, fontWeight: 700 };
+
 export default function Admin() {
   const [user, setUser] = useState(null);
 
@@ -36,7 +78,7 @@ export default function Admin() {
   const [designUrl, setDesignUrl] = useState(null);
 
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
-  const DESIGN_BUCKET = 'invitation-designs'; // <— make sure this bucket exists
+  const DESIGN_BUCKET = 'invitation-designs'; // make sure this bucket exists
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUser(data.user));
@@ -82,7 +124,6 @@ export default function Admin() {
   }
 
   async function loadDesign(eventId) {
-    // design stored as: invitation-designs/{eventId}/design.png
     const { data } = await supabase
       .storage
       .from(DESIGN_BUCKET)
@@ -153,7 +194,6 @@ export default function Admin() {
     if (!designFile) return alert('Choose a design image first.');
     if (!selectedEventId) return alert('Select an event first.');
 
-    // Always store as PNG path; Supabase will upsert/replace
     const path = `${selectedEventId}/design.png`;
     const { error } = await supabase
       .storage
@@ -192,20 +232,19 @@ export default function Admin() {
       const ctx = canvas.getContext('2d');
 
       if (designUrl) {
-        // Use uploaded design
         const designImg = await loadImage(designUrl);
         canvas.width = designImg.width;
         canvas.height = designImg.height;
         ctx.drawImage(designImg, 0, 0);
 
-        // Draw QR centered near bottom (slightly up)
+        // QR centered near bottom (slightly up)
         const qrImg = await loadImage(qrDataUrl);
-        const qrSize = Math.floor(Math.min(canvas.width, canvas.height) * 0.25); // ~25% of shortest side
+        const qrSize = Math.floor(Math.min(canvas.width, canvas.height) * 0.25);
         const qrX = Math.floor((canvas.width - qrSize) / 2);
-        const qrY = Math.floor(canvas.height - qrSize - (canvas.height * 0.08)); // ~8% up from bottom
+        const qrY = Math.floor(canvas.height - qrSize - (canvas.height * 0.08));
         ctx.drawImage(qrImg, qrX, qrY, qrSize, qrSize);
       } else {
-        // Fallback: plain sheet with QR + name text
+        // fallback: white background + QR + name
         const CANVAS_W = 512, CANVAS_H = 612;
         canvas.width = CANVAS_W; canvas.height = CANVAS_H;
         ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
@@ -214,7 +253,6 @@ export default function Admin() {
         const qrSize = 360, qrX = (CANVAS_W - qrSize) / 2, qrY = 80;
         ctx.drawImage(qrImg, qrX, qrY, qrSize, qrSize);
 
-        // Name under QR
         const name = iv.guest_name || 'Guest';
         ctx.fillStyle = '#000';
         ctx.textAlign = 'center';
@@ -242,99 +280,164 @@ export default function Admin() {
   function loadImage(src) {
     return new Promise((resolve, reject) => {
       const img = new Image();
-      img.crossOrigin = 'anonymous'; // allow public CDN
+      img.crossOrigin = 'anonymous';
       img.onload = () => resolve(img);
       img.onerror = reject;
       img.src = src;
     });
   }
 
+  // ---------- UI ----------
   return (
     <RequireRole role="admin">
-      <div style={{ padding: 20, fontFamily: 'sans-serif' }}>
-        <h2>Admin</h2>
+      <div style={{
+        minHeight: '100vh',
+        background: BRAND.bg,
+        color: BRAND.text,
+        fontFamily: 'sans-serif',
+        padding: 16,
+      }}>
+        <header style={{ textAlign: 'center', marginBottom: 18 }}>
+          <h1 style={{ margin: 0, fontSize: 28 }}>Ya Mar7aba – Admin</h1>
+          <p style={{ margin: 0, color: BRAND.textMuted, fontSize: 13 }}>Manage events, guests, and invitation designs</p>
+        </header>
 
-        {/* Event Picker */}
-        <section style={{ border: '1px solid #ddd', padding: 12, marginBottom: 16 }}>
-          <h3>Select event</h3>
-          {events.length === 0 && <p>No events yet. Create one below.</p>}
-          {events.length > 0 && (
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <select
-                value={selectedEventId || ''}
-                onChange={(e) => setSelectedEventId(e.target.value || null)}
-              >
-                {events.map((ev) => (
-                  <option key={ev.id} value={ev.id}>{ev.title}</option>
-                ))}
-              </select>
-              <button onClick={() => selectedEventId && loadInvites(selectedEventId)}>Refresh guests</button>
-              <button onClick={fetchEvents}>Refresh events</button>
-            </div>
-          )}
-        </section>
+        <div style={{ maxWidth: 1000, margin: '0 auto', display: 'grid', gap: 16, gridTemplateColumns: '1fr' }}>
+          {/* Row 1: Event picker + Create event */}
+          <div style={{ display: 'grid', gap: 16, gridTemplateColumns: '1fr 1fr' }}>
+            {/* Event Picker */}
+            <section style={section}>
+              <h3 style={h3}>Select event</h3>
+              {events.length === 0 && <p style={{ color: BRAND.textMuted }}>No events yet. Create one on the right.</p>}
+              {events.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <select
+                    value={selectedEventId || ''}
+                    onChange={(e) => setSelectedEventId(e.target.value || null)}
+                    style={{ ...input, maxWidth: 380 }}
+                  >
+                    {events.map((ev) => (
+                      <option key={ev.id} value={ev.id}>{ev.title}</option>
+                    ))}
+                  </select>
+                  <button style={btn(BRAND.accent)} onClick={() => selectedEventId && loadInvites(selectedEventId)}>Refresh guests</button>
+                  <button style={btn(BRAND.accent)} onClick={fetchEvents}>Refresh events</button>
+                </div>
+              )}
+            </section>
 
-        {/* Create Event */}
-        <section style={{ border: '1px solid #ddd', padding: 12, marginBottom: 16 }}>
-          <h3>Create event</h3>
-          <label>Title</label>
-          <input value={title} onChange={(e) => setTitle(e.target.value)} style={{ display: 'block', width: '100%', marginBottom: 8 }} />
-          <label>Venue</label>
-          <input value={venue} onChange={(e) => setVenue(e.target.value)} style={{ display: 'block', width: '100%', marginBottom: 8 }} />
-          <label>Start</label>
-          <input type="datetime-local" value={startAt} onChange={(e) => setStartAt(e.target.value)} style={{ display: 'block', marginBottom: 8 }} />
-          <label>End</label>
-          <input type="datetime-local" value={endAt} onChange={(e) => setEndAt(e.target.value)} style={{ display: 'block', marginBottom: 8 }} />
-          <button onClick={createEvent}>Create</button>
-        </section>
+            {/* Create Event */}
+            <section style={section}>
+              <h3 style={h3}>Create event</h3>
+              <label style={label}>Title</label>
+              <input style={input} value={title} onChange={(e) => setTitle(e.target.value)} />
+              <div style={{ height: 10 }} />
+              <label style={label}>Venue</label>
+              <input style={input} value={venue} onChange={(e) => setVenue(e.target.value)} />
+              <div style={{ height: 10 }} />
+              <label style={label}>Start</label>
+              <input style={input} type="datetime-local" value={startAt} onChange={(e) => setStartAt(e.target.value)} />
+              <div style={{ height: 10 }} />
+              <label style={label}>End</label>
+              <input style={input} type="datetime-local" value={endAt} onChange={(e) => setEndAt(e.target.value)} />
+              <div style={{ height: 14 }} />
+              <button style={btn()} onClick={createEvent}>Create</button>
+            </section>
+          </div>
 
-        {/* Invitation Design Upload */}
-        <section style={{ border: '1px solid #ddd', padding: 12, marginBottom: 16 }}>
-          <h3>Invitation Design</h3>
-          {designUrl && <div><img src={designUrl} alt="Design preview" style={{ maxWidth: 320, border: '1px solid #eee' }} /></div>}
-          <input type="file" accept="image/*" onChange={(e) => setDesignFile(e.target.files?.[0] || null)} />
-          <button onClick={uploadDesign} style={{ marginLeft: 8 }}>Upload Design</button>
-          <p style={{ color: '#666', fontSize: 12, marginTop: 6 }}>
-            Stored at: <code>{DESIGN_BUCKET}/{selectedEventId || 'eventId'}/design.png</code>
-          </p>
-        </section>
+          {/* Row 2: Invitation Design + Upload guests */}
+          <div style={{ display: 'grid', gap: 16, gridTemplateColumns: '1fr 1fr' }}>
+            {/* Invitation Design */}
+            <section style={section}>
+              <h3 style={h3}>Invitation Design</h3>
+              {designUrl && (
+                <div style={{ marginBottom: 10 }}>
+                  <img src={designUrl} alt="Design preview" style={{ maxWidth: '100%', borderRadius: 12, border: `1px solid ${BRAND.border}` }} />
+                </div>
+              )}
+              <input type="file" accept="image/*" onChange={(e) => setDesignFile(e.target.files?.[0] || null)}
+                     style={{ ...input, padding: 8, background: 'transparent', border: '1px dashed ' + BRAND.inputBorder }} />
+              <div style={{ height: 10 }} />
+              <button style={btn(BRAND.accent)} onClick={uploadDesign}>Upload Design</button>
+              <p style={{ color: BRAND.textMuted, fontSize: 12, marginTop: 8 }}>
+                Stored at: <code>invitation-designs/{selectedEventId || 'eventId'}/design.png</code>
+              </p>
+            </section>
 
-        {/* Upload guests (CSV) */}
-        <section style={{ border: '1px solid #ddd', padding: 12, marginBottom: 16 }}>
-          <h3>Upload guests (CSV)</h3>
-          <p>Columns: <code>guest_name, guest_contact</code></p>
-          <input type="file" accept=".csv" onChange={handleCsv} />
-          <button onClick={importGuests} disabled={!guests.length || !selectedEventId} style={{ marginLeft: 8 }}>
-            Import guests
-          </button>
-        </section>
+            {/* Upload guests */}
+            <section style={section}>
+              <h3 style={h3}>Upload guests (CSV)</h3>
+              <p style={{ color: BRAND.textMuted, marginTop: 0 }}>
+                Columns: <code>guest_name, guest_contact</code>
+              </p>
+              <input type="file" accept=".csv" onChange={handleCsv}
+                     style={{ ...input, padding: 8, background: 'transparent', border: '1px dashed ' + BRAND.inputBorder }} />
+              <div style={{ height: 10 }} />
+              <button style={btn()} onClick={importGuests} disabled={!guests.length || !selectedEventId}>
+                Import guests
+              </button>
+            </section>
+          </div>
 
-        {/* Export */}
-        <section style={{ border: '1px solid #ddd', padding: 12, marginBottom: 16 }}>
-          <h3>Export</h3>
-          <button onClick={downloadCSV} disabled={!invites.length}>Download CSV (links)</button>
-          <button onClick={downloadQRCodes} disabled={!invites.length} style={{ marginInlineStart: 8 }}>
-            Download QR Invitations
-          </button>
-        </section>
+          {/* Row 3: Export + Invites list */}
+          <div style={{ display: 'grid', gap: 16, gridTemplateColumns: '1fr 1fr' }}>
+            {/* Export */}
+            <section style={section}>
+              <h3 style={h3}>Export</h3>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                <button style={btn(BRAND.accent)} onClick={downloadCSV} disabled={!invites.length}>
+                  Download CSV (links)
+                </button>
+                <button style={btn()} onClick={downloadQRCodes} disabled={!invites.length}>
+                  Download QR Invitations
+                </button>
+              </div>
+            </section>
 
-        {/* Invites list */}
-        <section style={{ border: '1px solid #ddd', padding: 12 }}>
-          <h3>Invites</h3>
-          {!selectedEventId && <p>Select an event to view guests.</p>}
-          {selectedEventId && invites.length === 0 && <p>— no guests —</p>}
-          {selectedEventId && invites.length > 0 && (
-            <ul>
-              {invites.map((iv) => (
-                <li key={iv.id}>
-                  {iv.guest_name} — {iv.code} — {iv.status} —{' '}
-                  <a href={`${baseUrl}/i/${iv.id}`} target="_blank" rel="noreferrer">link</a>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+            {/* Invites list */}
+            <section style={section}>
+              <h3 style={h3}>Invites</h3>
+              {!selectedEventId && <p style={{ color: BRAND.textMuted }}>Select an event to view guests.</p>}
+              {selectedEventId && invites.length === 0 && <p style={{ color: BRAND.textMuted }}>— no guests —</p>}
+              {selectedEventId && invites.length > 0 && (
+                <div style={{ maxHeight: 320, overflow: 'auto', border: `1px solid ${BRAND.border}`, borderRadius: 12 }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', background: BRAND.surface }}>
+                    <thead>
+                      <tr style={{ background: BRAND.bg }}>
+                        <th style={thStyle()}>Name</th>
+                        <th style={thStyle()}>Code</th>
+                        <th style={thStyle()}>Status</th>
+                        <th style={thStyle()}>Link</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {invites.map((iv) => (
+                        <tr key={iv.id} style={{ borderBottom: `1px solid ${BRAND.border}` }}>
+                          <td style={tdStyle()}>{iv.guest_name}</td>
+                          <td style={tdStyle()}>{iv.code}</td>
+                          <td style={tdStyle()}>{iv.status}</td>
+                          <td style={tdStyle()}>
+                            <a href={`${baseUrl}/i/${iv.id}`} target="_blank" rel="noreferrer" style={{ color: '#BBDEFB' }}>
+                              open
+                            </a>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          </div>
+        </div>
       </div>
     </RequireRole>
   );
+}
+
+function thStyle() {
+  return { textAlign: 'left', color: BRAND.textMuted, padding: '10px 12px', borderBottom: `1px solid ${BRAND.border}`, fontSize: 13 };
+}
+function tdStyle() {
+  return { padding: '12px 10px' };
 }
