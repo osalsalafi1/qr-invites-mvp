@@ -7,21 +7,25 @@ export default function Checker() {
   const [user, setUser] = useState(null);
   const [result, setResult] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
-  const [cams, setCams] = useState([]);
-  const [deviceId, setDeviceId] = useState('');
-  const [running, setRunning] = useState(false);
-  const qrRef = useRef(null);
+  const [cams, setCams] = useState([]);          // list of cameras
+  const [deviceId, setDeviceId] = useState('');  // chosen camera
+  const [running, setRunning] = useState(false); // is scanner running?
+  const qrRef = useRef(null);                    // Html5Qrcode instance
   const manualRef = useRef(null);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUser(data.user));
   }, []);
 
+  // Ask permission & enumerate cameras (iOS often requires a user gesture)
   async function listCameras() {
     try {
-      const s = await navigator.mediaDevices.getUserMedia({ video: true });
+      const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       s.getTracks().forEach(t => t.stop());
-    } catch (_) {}
+    } catch (_) {
+      // ignore; just to trigger permission prompt so labels are visible
+    }
+
     const devices = await navigator.mediaDevices.enumerateDevices();
     const vs = devices.filter(d => d.kind === 'videoinput');
     setCams(vs);
@@ -37,21 +41,24 @@ export default function Checker() {
     try {
       const mod = await import('html5-qrcode');
       const { Html5Qrcode } = mod;
+
       const mountId = 'qr-reader';
       const el = document.getElementById(mountId);
       if (!el) return;
 
+      // cleanup any previous session
       try { await qrRef.current?.stop(); } catch {}
       try { await qrRef.current?.clear(); } catch {}
 
+      // ensure we have a chosen device
       if (!deviceId) await listCameras();
       const chosen = deviceId || cams[0]?.deviceId;
       if (!chosen) {
-        setErrorMsg('No camera available. Enable camera permissions.');
+        setErrorMsg('No camera available. Enable camera permission and try again.');
         return;
       }
 
-      const qr = new Html5Qrcode(mountId, true);
+      const qr = new Html5Qrcode(mountId, /* verbose */ true);
       qrRef.current = qr;
 
       await qr.start(
@@ -60,13 +67,14 @@ export default function Checker() {
         async (decodedText) => {
           setResult('Checking...');
           await handleDecoded(decodedText);
-        }
+        },
+        () => {} // ignore continuous scan failures
       );
       setRunning(true);
     } catch (e) {
       let msg = e?.message || e?.name || String(e);
-      if (/Permission|NotAllowed/i.test(msg)) msg += ' — allow camera in browser settings.';
-      if (/secure context|getUserMedia/i.test(msg)) msg += ' — must use HTTPS (Vercel is fine).';
+      if (/Permission|NotAllowed/i.test(msg)) msg += ' — allow camera in browser/site settings.';
+      if (/secure context|getUserMedia/i.test(msg)) msg += ' — must use HTTPS (Vercel is OK).';
       setErrorMsg(msg);
       setRunning(false);
     }
@@ -78,34 +86,57 @@ export default function Checker() {
     setRunning(false);
   }
 
+  // ✅ Correct “Already used” behavior (atomic update + row count)
   async function handleDecoded(text) {
     try {
       const url = new URL(text);
       const parts = url.pathname.split('/').filter(Boolean);
+      // Expect /i/{inviteId}
       const id = parts[1] || parts[0];
       if (!id) { setResult('Unknown link'); return; }
 
-      const { error } = await supabase.from('invites')
+      // Attempt to check-in ONLY if currently PENDING; return the updated row(s)
+      const { data: updated, error } = await supabase
+        .from('invites')
         .update({
           status: 'CHECKED_IN',
           checked_in_at: new Date().toISOString(),
           checked_in_by: user?.id || null
         })
         .eq('id', id)
-        .eq('status', 'PENDING');
+        .eq('status', 'PENDING')
+        .select('id, guest_name, status');
 
-      if (error) { setResult('Failed: ' + error.message); return; }
+      if (error) {
+        setResult('Failed: ' + error.message);
+        return;
+      }
 
-      const { data } = await supabase.from('invites')
-        .select('guest_name,status')
-        .eq('id', id)
-        .single();
+      // If no rows updated → it wasn’t PENDING → fetch current status to decide what to show
+      if (!updated || updated.length === 0) {
+        const { data: existing, error: fetchErr } = await supabase
+          .from('invites')
+          .select('guest_name, status')
+          .eq('id', id)
+          .single();
 
-      if (!data) { setResult('Invite not found'); return; }
-      if (data.status !== 'CHECKED_IN') { setResult('Already used'); return; }
+        if (fetchErr || !existing) {
+          setResult('Invite not found');
+          return;
+        }
 
-      setResult(`Checked in: ${data.guest_name}`);
-    } catch {
+        if (existing.status === 'CHECKED_IN') {
+          setResult(`Already used: ${existing.guest_name}`);
+        } else {
+          setResult(`Cannot check in: status is ${existing.status}`);
+        }
+        return;
+      }
+
+      // Success path: we flipped PENDING → CHECKED_IN
+      const row = updated[0];
+      setResult(`Checked in: ${row.guest_name}`);
+    } catch (_e) {
       setResult('Invalid QR content');
     }
   }
@@ -121,18 +152,18 @@ export default function Checker() {
     <RequireRole role={['checker','admin']}>
       <div style={{ padding: 16, fontFamily: 'sans-serif' }}>
         <h2>Scanner</h2>
-        <div style={{ marginBottom: 10 }}>
+
+        {/* Camera controls */}
+        <div style={{ marginBottom: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {!cams.length && (
-            <button onClick={listCameras} style={{ marginRight: 8 }}>
-              Find cameras
-            </button>
+            <button onClick={listCameras}>Find cameras</button>
           )}
           {cams.length > 0 && (
             <>
               <select
                 value={deviceId}
                 onChange={e => setDeviceId(e.target.value)}
-                style={{ marginRight: 8 }}
+                style={{ minWidth: 200 }}
               >
                 {cams.map(c => (
                   <option key={c.deviceId} value={c.deviceId}>
@@ -148,16 +179,26 @@ export default function Checker() {
             </>
           )}
         </div>
-        <div id="qr-reader" style={{ width: 320, maxWidth: '100%', minHeight: 260, background: '#f7f7f7' }} />
+
+        <div
+          id="qr-reader"
+          style={{ width: 320, maxWidth: '100%', minHeight: 260, background: '#f7f7f7' }}
+        />
+
         {errorMsg && (
-          <div style={{ marginTop: 10, padding: 10, background: '#ffecec', color: '#a00' }}>
+          <div style={{ marginTop: 10, padding: 10, background: '#ffecec', color: '#a00', border: '1px solid #f5c2c2' }}>
             <b>Camera error:</b> {errorMsg}
           </div>
         )}
+
         <p style={{ marginTop: 12, fontSize: 16 }}>{result}</p>
         <hr />
         <h4>Manual input (invite UUID)</h4>
-        <input ref={manualRef} placeholder="550e8400-e29b-41d4-a716-446655440000" style={{ width: 320 }} />
+        <input
+          ref={manualRef}
+          placeholder="550e8400-e29b-41d4-a716-446655440000"
+          style={{ width: 320 }}
+        />
         <button onClick={manualCheckin} style={{ marginInlineStart: 8 }}>Check-in</button>
       </div>
     </RequireRole>
