@@ -1,29 +1,72 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { supabase } from '@/src/lib/supabaseClient'; // only used to fetch guest_name (optional)
+import { supabase } from '@/src/lib/supabaseClient'; // only to fetch display name (optional)
 import RequireRole from '@/components/RequireRole';
+
+const STORAGE_KEY = 'qr_checker_scans_v1'; // change if you ever want to force a fresh session
 
 export default function Checker() {
   const [user, setUser] = useState(null);
   const [errorMsg, setErrorMsg] = useState('');
-  const [cams, setCams] = useState([]);          // available cameras
-  const [deviceId, setDeviceId] = useState('');  // chosen camera
-  const [running, setRunning] = useState(false); // is scanner running
-  const [scans, setScans] = useState([]);        // table rows: {id, name, time, status}
-  const seenRef = useRef(new Set());             // session memory of scanned IDs
-  const qrRef = useRef(null);                    // Html5Qrcode instance
+  const [cams, setCams] = useState([]);
+  const [deviceId, setDeviceId] = useState('');
+  const [running, setRunning] = useState(false);
+  const [scans, setScans] = useState([]); // rows: {id, name, time, status}
+  const scansRef = useRef(scans);         // keep latest for handlers
+  const seenRef = useRef(new Set());      // normalized IDs seen in THIS persisted session
+  const qrRef = useRef(null);
   const manualRef = useRef(null);
+
+  // Load persisted session (table + seen IDs)
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed?.scans)) {
+          setScans(parsed.scans);
+          scansRef.current = parsed.scans;
+          seenRef.current = new Set((parsed.scans || []).map(r => r.id));
+        }
+      }
+    } catch { /* ignore corrupt storage */ }
+  }, []);
+
+  // Persist whenever scans change
+  useEffect(() => {
+    scansRef.current = scans;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ scans }));
+    } catch { /* storage might be full or disabled */ }
+  }, [scans]);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUser(data.user)).catch(() => {});
   }, []);
 
-  // Ask permission & enumerate cameras (iOS needs a user gesture)
+  // Normalize any scanned text to a canonical ID
+  function normalizeId(text) {
+    try {
+      const trimmed = (text || '').trim();
+      const url = new URL(trimmed);
+      let path = url.pathname || '';
+      const parts = path.split('/').filter(Boolean);
+      let id = '';
+      const iIndex = parts.findIndex(x => x.toLowerCase() === 'i');
+      if (iIndex >= 0 && parts[iIndex + 1]) id = parts[iIndex + 1];
+      else id = parts[parts.length - 1] || '';
+      id = decodeURIComponent(id).trim();
+      return id.toLowerCase();
+    } catch {
+      return (text || '').trim().toLowerCase();
+    }
+  }
+
   async function listCameras() {
     try {
       const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       s.getTracks().forEach(t => t.stop());
-    } catch (_) { /* just to unlock labels / permission prompt */ }
+    } catch (_) {}
     const devices = await navigator.mediaDevices.enumerateDevices();
     const vs = devices.filter(d => d.kind === 'videoinput');
     setCams(vs);
@@ -43,7 +86,6 @@ export default function Checker() {
       const el = document.getElementById(mountId);
       if (!el) return;
 
-      // cleanup previous session
       try { await qrRef.current?.stop(); } catch {}
       try { await qrRef.current?.clear(); } catch {}
 
@@ -54,17 +96,17 @@ export default function Checker() {
         return;
       }
 
-      const qr = new Html5Qrcode(mountId, /* verbose */ true);
+      const qr = new Html5Qrcode(mountId, true);
       qrRef.current = qr;
 
       await qr.start(
         { deviceId: { exact: chosen } },
         { fps: 10, qrbox: { width: 260, height: 260 } },
         async (decodedText) => {
-          await stopCamera();        // stop immediately after 1 decode
+          await stopCamera();
           await handleDecoded(decodedText);
         },
-        () => {} // ignore continuous scan failures
+        () => {}
       );
       setRunning(true);
     } catch (e) {
@@ -82,69 +124,50 @@ export default function Checker() {
     setRunning(false);
   }
 
-  // Parse /i/{inviteId}. Returns {id} or null
-  function extractIdFromText(text) {
-    try {
-      const url = new URL(text);
-      const parts = url.pathname.split('/').filter(Boolean);
-      const id = parts[1] || parts[0];
-      return id || null;
-    } catch {
-      // Not a URL? Maybe the raw text is the UUID itself
-      const maybe = (text || '').trim();
-      return maybe || null;
-    }
-  }
-
-  // Session-based decision:
-  // If id already in table → "ALREADY"
-  // Else → "OK" and remember it
+  // Decide using ONLY what's already in the persisted table for this device/session
   async function handleDecoded(text) {
     const now = new Date().toLocaleString();
-    const id = extractIdFromText(text);
+    const id = normalizeId(text);
 
     if (!id) {
       setScans(prev => [{ id: '-', name: 'Invalid QR', time: now, status: 'INVALID' }, ...prev]);
       return;
     }
 
-    if (seenRef.current.has(id)) {
-      // Already scanned in this session
-      // We only display; no DB update
-      const name = await fetchNameIfPossible(id);
-      setScans(prev => [{ id, name, time: now, status: 'ALREADY' }, ...prev]);
-      return;
-    }
+    // Check against what’s already in the table (and seenRef)
+    const already = seenRef.current.has(id) || scansRef.current.some(r => r.id === id);
 
-    // First time in this session
-    seenRef.current.add(id);
+    // Optional: fetch display name from DB (read-only)
     const name = await fetchNameIfPossible(id);
-    setScans(prev => [{ id, name, time: now, status: 'OK' }, ...prev]);
+
+    // Record row
+    setScans(prev => [{ id, name, time: now, status: already ? 'ALREADY' : 'OK' }, ...prev]);
+
+    // Remember this id as seen (so future scans—even after refresh—still show ALREADY)
+    seenRef.current.add(id);
   }
 
-  // Optional: fetch guest name from DB for nicer display.
   async function fetchNameIfPossible(id) {
     try {
-      const { data, error } = await supabase
+      const { data } = await supabase
         .from('invites')
         .select('guest_name')
         .eq('id', id)
         .single();
-      if (error || !data) return 'Guest';
-      return data.guest_name || 'Guest';
+      return data?.guest_name || 'Guest';
     } catch {
       return 'Guest';
     }
   }
 
-  async function manualCheckin() {
-    const id = manualRef.current?.value?.trim();
-    if (!id) return;
+  async function manualAdd() {
+    const val = manualRef.current?.value?.trim();
+    if (!val) return;
     await stopCamera();
-    await handleDecoded(id);
+    await handleDecoded(val);
+    manualRef.current.value = '';
   }
 
-  // Status dot
   function Dot({ status }) {
     const ok = status === 'OK';
     const already = status === 'ALREADY';
@@ -205,20 +228,18 @@ export default function Checker() {
 
         {/* Manual input */}
         <div style={{ marginTop: 14 }}>
-          <h4>Manual input (invite UUID or full URL)</h4>
+          <h4>Manual add (invite UUID or full URL)</h4>
           <input
             ref={manualRef}
             placeholder="550e8400-e29b-41d4-a716-446655440000  OR  https://.../i/UUID"
             style={{ width: 360, maxWidth: '100%' }}
           />
-          <button onClick={manualCheckin} style={{ marginInlineStart: 8 }}>
-            Add to table
-          </button>
+        <button onClick={manualAdd} style={{ marginInlineStart: 8 }}>Add to table</button>
         </div>
 
-        {/* Scan results table (session-based) */}
+        {/* Session table (persisted in localStorage) */}
         <div style={{ marginTop: 20 }}>
-          <h3>Scans (this session)</h3>
+          <h3>Scans (this device)</h3>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
@@ -247,6 +268,10 @@ export default function Checker() {
               </tbody>
             </table>
           </div>
+          <p style={{ color: '#6b7280', fontSize: 13, marginTop: 8 }}>
+            * Data is stored locally in this browser (localStorage). Refreshing the page keeps the table;
+            clearing site data will reset it.
+          </p>
         </div>
       </div>
     </RequireRole>
