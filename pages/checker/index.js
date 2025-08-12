@@ -10,7 +10,7 @@ const BRAND = {
   primary: '#6B4226', primaryHover: '#7E4B2B', accent: '#B0825C',
   success: '#22C55E', warn: '#F59E0B', danger: '#EF4444',
 };
-const STORAGE_KEY = 'ya_marhaba_checker_scans_v4';
+const STORAGE_KEY = 'ya_marhaba_checker_scans_continuous_v1';
 
 const Card = ({ children, style }) => (
   <div style={{
@@ -61,9 +61,10 @@ export default function Checker(){
   const qrRef=useRef(null);
   const manualRef=useRef(null);
 
-  // guards to avoid race conditions causing client-side exceptions
-  const processingRef = useRef(false);  // one decodedText at a time
-  const stoppingRef = useRef(false);    // one stop/clear at a time
+  // continuous-mode de-duplication
+  const lastValRef = useRef('');
+  const lastAtRef = useRef(0);
+  const DEDUP_MS = 1200; // ignore same value within this window
 
   // Load persisted table
   useEffect(()=>{
@@ -131,7 +132,7 @@ export default function Checker(){
     }
   }
 
-  // ---------- Start camera (pass cameraConfig directly; try fallbacks) ----------
+  // ---------- Start camera (continuous scanning; no stop on decode) ----------
   let starting=false;
   async function startCamera(){
     setErrorMsg('');
@@ -145,10 +146,10 @@ export default function Checker(){
       if(!el) throw new Error('#qr-reader element not found.');
       if(!navigator.mediaDevices?.getUserMedia) throw new Error('Camera API not supported.');
 
-      // clean old session
-      await safeClear();
+      // clear previous instance if any (no double clear/stop race because we’re not running)
+      try{ await qrRef.current?.stop(); }catch{}
+      try{ await qrRef.current?.clear(); }catch{}
 
-      // import lib
       let Html5Qrcode;
       try{
         const mod=await import('html5-qrcode'); Html5Qrcode=mod.Html5Qrcode;
@@ -156,7 +157,6 @@ export default function Checker(){
 
       const qr=new Html5Qrcode(mountId,true); qrRef.current=qr;
 
-      // IMPORTANT: pass cameraConfig directly
       const tryConfigs = [
         deviceId ? { deviceId: { exact: deviceId } } : null,
         { facingMode: 'environment' },
@@ -170,19 +170,25 @@ export default function Checker(){
             cameraConfig,
             { fps: 10, qrbox: { width: 280, height: 280 } },
             async (decodedText)=>{
-              if (processingRef.current) return; // ignore rapid double fires
-              processingRef.current = true;
+              // continuous scanning: do NOT stop camera here
+              const now = Date.now();
+              if (decodedText === lastValRef.current && (now - lastAtRef.current) < DEDUP_MS) {
+                return; // ignore rapid duplicate of same code
+              }
+              lastValRef.current = decodedText;
+              lastAtRef.current = now;
               try{
-                await stopCamera();            // stop FIRST, then process
                 await handleDecoded(decodedText);
-              }catch(scanErr){
-                console.error('decode error:',scanErr);
+                // tiny haptic hint on phones if available
+                if (typeof window !== 'undefined' && window.navigator?.vibrate) {
+                  window.navigator.vibrate(30);
+                }
+              }catch(e){
+                console.error('decode handler error:', e);
                 setErrorMsg('Scanned, but processing failed.');
-              }finally{
-                processingRef.current = false;
               }
             },
-            ()=>{} // onScanFailure: keep quiet
+            ()=>{} // onScanFailure: ignore noisy frames
           );
           startedOk=true; break;
         }catch(e){
@@ -201,65 +207,40 @@ export default function Checker(){
     }finally{ starting=false; }
   }
 
-  // ---------- Safe stop/clear (prevents removeChild / play() abort errors) ----------
+  // ---------- Stop camera (manual pause button) ----------
   async function stopCamera(){
-    if (stoppingRef.current) return;
-    stoppingRef.current = true;
-    try{
-      const qr = qrRef.current;
-      if (!qr) { setRunning(false); return; }
-
-      try { await qr.stop(); } catch(e){ console.warn('qr.stop issue:', e); }
-      // Let video detach/settle before clearing DOM
-      await new Promise(r => setTimeout(r, 50));
-      try { await qr.clear(); } catch(e){ console.warn('qr.clear issue:', e); }
-
-      setRunning(false);
-    } finally {
-      stoppingRef.current = false;
-    }
-  }
-
-  // Used by startCamera before starting a new instance
-  async function safeClear(){
-    try{
-      if(qrRef.current){
-        try{ await qrRef.current.stop(); }catch{}
-        await new Promise(r => setTimeout(r, 50));
-        try{ await qrRef.current.clear(); }catch{}
-      }
-    }catch{}
+    try{ await qrRef.current?.stop(); }catch(e){ console.warn('qr.stop issue:', e); }
+    // give the <video> a tick to detach before clearing DOM
+    await new Promise(r => setTimeout(r, 50));
+    try{ await qrRef.current?.clear(); }catch(e){ console.warn('qr.clear issue:', e); }
+    setRunning(false);
   }
 
   // ---------- Scanning ----------
   async function handleDecoded(text){
-    try{
-      const now=new Date().toLocaleString();
-      const id=normalizeId(text);
-      if(!id){
-        addRow({id:'-',name:'Invalid QR',time:now,status:'INVALID'});
-        showToast('Invalid QR','danger'); return;
-      }
-      const duplicate = seenRef.current.has(id) || scansRef.current.some(r=>r.id===id);
-      const name = await fetchNameIfPossible(id);
-      addRow({id,name,time:now,status:duplicate?'ALREADY':'OK'});
-      showToast(duplicate?`Already in table — ${name}`:`Checked — ${name}`, duplicate?'warn':'success');
-      seenRef.current.add(id);
-    }catch(e){
-      console.error('handleDecoded crashed:',e);
-      setErrorMsg('Invalid QR content or internal error.');
+    const nowStr=new Date().toLocaleString();
+    const id=normalizeId(text);
+    if(!id){
+      addRow({id:'-',name:'Invalid QR',time:nowStr,status:'INVALID'});
+      showToast('Invalid QR','danger'); return;
     }
+    const duplicate = seenRef.current.has(id) || scansRef.current.some(r=>r.id===id);
+    const name = await fetchNameIfPossible(id);
+    addRow({id,name,time:nowStr,status:duplicate?'ALREADY':'OK'});
+    showToast(duplicate?`Already in table — ${name}`:`Checked — ${name}`, duplicate?'warn':'success');
+    seenRef.current.add(id);
   }
   function addRow(row){ setScans(prev=>[row,...prev]); }
   async function manualAdd(){
     const val=manualRef.current?.value?.trim(); if(!val) return;
-    await stopCamera(); await handleDecoded(val); manualRef.current.value='';
+    await handleDecoded(val);
+    manualRef.current.value='';
   }
 
   // Toast
   function showToast(message,type='success'){
     setToast({message,type});
-    setTimeout(()=>setToast(null),1600);
+    setTimeout(()=>setToast(null),1500);
   }
 
   const StatusChip=({status})=>{
@@ -300,10 +281,10 @@ export default function Checker(){
                 </div>
                 <h1 style={{margin:'6px 0 0', fontSize:22, fontWeight:800}}>Guest Checker</h1>
                 <p style={{margin:'6px 0 0', color:BRAND.textMuted, fontSize:13}}>
-                  Start camera → scan → we stop the camera and log it below. Repeat scans in this device session show “Already in table”.
+                  Camera stays on. Each QR is logged below. Repeats in this session show “Already in table”.
                 </p>
                 <div style={{marginTop:8, fontSize:12, color:BRAND.accent, letterSpacing:'0.08em'}}>
-                  UI build: YA-MARHABA v4
+                  UI build: YA-MARHABA continuous v1
                 </div>
               </div>
             </div>
@@ -324,7 +305,7 @@ export default function Checker(){
                   {!running ? (
                     <Button onClick={startCamera}>▶️ Start camera</Button>
                   ) : (
-                    <Button variant="subtle" onClick={stopCamera}>⏹ Stop camera</Button>
+                    <Button variant="subtle" onClick={stopCamera}>⏸ Pause camera</Button>
                   )}
                 </>
               )}
@@ -392,7 +373,7 @@ export default function Checker(){
                   {scans.length===0 ? (
                     <tr>
                       <td colSpan={5} style={{...tdStyle(), color:BRAND.textMuted, textAlign:'center'}}>
-                        No scans yet — try the camera or manual add.
+                        No scans yet — point your camera at a QR.
                       </td>
                     </tr>
                   ) : (
