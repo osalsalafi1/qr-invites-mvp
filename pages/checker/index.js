@@ -133,7 +133,7 @@ export default function Checker(){
     }
   }
 
-  // ---------- Start camera (robust) ----------
+  // ---------- Start camera (FIXED: pass cameraConfig directly) ----------
   let starting=false;
   async function startCamera(){
     setErrorMsg('');
@@ -162,18 +162,18 @@ export default function Checker(){
 
       const qr=new Html5Qrcode(mountId,true); qrRef.current=qr;
 
-      // Try chain: exact deviceId -> facingMode env -> generic video
-      const tryConfigs=[
-        deviceId ? {video:{ deviceId:{ exact:deviceId }}} : null,
-        {video:{ facingMode:{ exact:'environment' }}},
-        {video:true},
+      // IMPORTANT: Html5Qrcode.start expects the cameraConfig directly, NOT wrapped in { video: ... }
+      const tryConfigs = [
+        deviceId ? { deviceId: { exact: deviceId } } : null,
+        { facingMode: 'environment' },
+        { facingMode: 'user' } // last resort
       ].filter(Boolean);
 
       let started=false, lastErr=null;
-      for(const cfg of tryConfigs){
+      for(const cameraConfig of tryConfigs){
         try{
           await qr.start(
-            cfg.video,
+            cameraConfig,                              // <-- fixed
             { fps: 10, qrbox: { width: 280, height: 280 } },
             async (decodedText)=>{
               try{ await stopCamera(); await handleDecoded(decodedText); }
@@ -183,7 +183,7 @@ export default function Checker(){
           );
           started=true; break;
         }catch(e){
-          console.warn('qr.start failed with cfg',cfg,e);
+          console.warn('qr.start failed with config', cameraConfig, e);
           lastErr=e;
         }
       }
@@ -211,7 +211,6 @@ export default function Checker(){
     try{
       if(!window.isSecureContext) throw new Error('Use HTTPS to access camera.');
       if(!navigator.mediaDevices?.getUserMedia) throw new Error('Camera API not supported.');
-      // pick best guess
       const videoConstraints = deviceId
         ? { deviceId: { exact: deviceId } }
         : { facingMode: { exact: 'environment' } };
@@ -313,7 +312,7 @@ export default function Checker(){
                   Start camera → scan → we stop the camera and log it below. Repeat scans in this device session show “Already in table”.
                 </p>
                 <div style={{marginTop:8, fontSize:12, color:BRAND.accent, letterSpacing:'0.08em'}}>
-                  UI build: YA-MARHABA v2025-08-12-02
+                  UI build: YA-MARHABA v2025-08-12-03
                 </div>
               </div>
             </div>
