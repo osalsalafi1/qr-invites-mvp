@@ -8,13 +8,11 @@ export default function Checker() {
   const [scanner, setScanner] = useState(null);
   const [scanning, setScanning] = useState(false);
 
-  // Load saved data from localStorage
   useEffect(() => {
     const saved = localStorage.getItem('yaMarhabaScans');
     if (saved) setScans(JSON.parse(saved));
   }, []);
 
-  // Save data to localStorage
   useEffect(() => {
     localStorage.setItem('yaMarhabaScans', JSON.stringify(scans));
   }, [scans]);
@@ -30,7 +28,7 @@ export default function Checker() {
       { facingMode: "environment" },
       { fps: 10, qrbox: 250 },
       (decodedText) => handleScan(decodedText),
-      (err) => { }
+      () => {}
     ).catch(err => {
       console.error("Unable to start scanning", err);
     });
@@ -46,14 +44,23 @@ export default function Checker() {
   };
 
   const handleScan = (decodedText) => {
-    const exists = scans.find((item) => item.code === decodedText);
+    // Expecting format: NAME|UUID
+    const parts = decodedText.split('|');
+    if (parts.length !== 2) {
+      setMessage({ text: '❌ Invalid QR format', type: 'error' });
+      return;
+    }
+
+    const guestName = parts[0].trim();
+    const guestCode = parts[1].trim();
+
+    const exists = scans.find((item) => item.code === guestCode);
 
     if (exists) {
       setMessage({ text: `❌ Already scanned at ${exists.time}`, type: 'error' });
     } else {
-      const guestName = prompt('Enter guest name:') || 'Unknown Guest';
       const newEntry = {
-        code: decodedText,
+        code: guestCode,
         name: guestName,
         time: new Date().toLocaleString(),
       };
@@ -72,7 +79,6 @@ export default function Checker() {
     }}>
       <h1 style={{ textAlign: 'center', marginBottom: '20px' }}>🎉 Ya Marhaba - Guest Check-In</h1>
 
-      {/* Start/Stop button */}
       {!scanning ? (
         <button
           onClick={startScanning}
@@ -109,10 +115,8 @@ export default function Checker() {
         </button>
       )}
 
-      {/* QR Reader */}
       <div id="qr-reader" style={{ margin: 'auto', maxWidth: '400px', backgroundColor: '#fff', padding: '10px', borderRadius: '10px' }}></div>
 
-      {/* Status message */}
       {message.text && (
         <div style={{
           marginTop: '20px',
@@ -127,7 +131,6 @@ export default function Checker() {
         </div>
       )}
 
-      {/* Table */}
       <h2 style={{ marginTop: '30px' }}>✅ Checked-in Guests</h2>
       {scans.length === 0 ? (
         <p>No guests checked in yet.</p>
