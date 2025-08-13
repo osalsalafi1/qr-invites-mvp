@@ -15,7 +15,7 @@ export default function Checker() {
   const [scans, setScans] = useState([]);
   const [lastStatus, setLastStatus] = useState(null); 
   const [lastTime, setLastTime] = useState(null);
-  const [language, setLanguage] = useState('en'); // NEW
+  const [language, setLanguage] = useState('en');
 
   const scansRef = useRef(scans);
   const seenRef = useRef(new Set());
@@ -39,6 +39,7 @@ export default function Checker() {
       guest: "Guest",
       time: "Time",
       status: "Status",
+      guestCount: "Guests in Hall",
       langSwitch: "عربي"
     },
     ar: {
@@ -57,6 +58,7 @@ export default function Checker() {
       guest: "الضيف",
       time: "الوقت",
       status: "الحالة",
+      guestCount: "عدد الضيوف في القاعة",
       langSwitch: "English"
     }
   };
@@ -222,6 +224,9 @@ export default function Checker() {
 
   const t = translations[language];
 
+  // ✅ Guest count: only unique green ones
+  const guestCount = new Set(scans.filter(r => r.status === 'OK').map(r => r.id)).size;
+
   return (
     <RequireRole role={['checker','admin']}>
       <div style={{ padding: 16, fontFamily: 'sans-serif', maxWidth: 820, margin: '0 auto', background: '#3E2723', color: '#fff', borderRadius: 8 }}>
@@ -233,7 +238,12 @@ export default function Checker() {
           </button>
         </div>
 
-        <h1 style={{ textAlign: 'center', fontSize: 28, marginBottom: 20 }}>{t.brand}</h1>
+        <h1 style={{ textAlign: 'center', fontSize: 28, marginBottom: 10 }}>{t.brand}</h1>
+
+        {/* ✅ Guest counter */}
+        <h3 style={{ textAlign: 'center', marginBottom: 20 }}>
+          {t.guestCount}: {guestCount}
+        </h3>
 
         {/* Start/Stop Camera */}
         <div style={{ marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
