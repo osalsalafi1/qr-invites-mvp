@@ -79,7 +79,8 @@ export default function Admin() {
 
   // Global QR placement config (per event) — percentages so it adapts to any design size
   // xPct/yPct are the center point in %, sizePct is % of image width
-  const [qrCfg, setQrCfg] = useState({ xPct: 50, yPct: 85, sizePct: 25, transparent: true });
+  // ✅ NEW: font (saved with the same config)
+  const [qrCfg, setQrCfg] = useState({ xPct: 50, yPct: 85, sizePct: 25, transparent: true, font: 'Tahoma' });
   const previewRef = useRef(null);
 
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
@@ -300,30 +301,31 @@ export default function Admin() {
     const qrImg = await loadImage(previewQr);
     ctx.drawImage(qrImg, x, y, qrSize, qrSize);
 
-    // preview Arabic name under QR
-    const guestName = 'الضيف';
-    const maxTextWidth = Math.floor(qrSize * 1.05);
-    let fontSize = Math.max(14, Math.floor(qrSize * 0.18));
+    // ✅ Preview Arabic text under QR: line 1 (honorific), line 2 (name)
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.direction = 'rtl';
     ctx.fillStyle = '#000';
 
-    while (fontSize >= 14) {
-      ctx.font = `bold ${fontSize}px Tahoma, Arial, sans-serif`;
-      if (ctx.measureText(guestName).width <= maxTextWidth) break;
-      fontSize -= 2;
+    // label smaller
+    const label = 'الضيفة المكرمة';
+    let labelSize = Math.max(12, Math.floor(qrSize * 0.15));
+    ctx.font = `bold ${labelSize}px "${qrCfg.font}", Tahoma, Arial, sans-serif`;
+    ctx.fillText(label, cx, y + qrSize + Math.round(qrSize * 0.08));
+
+    // name bigger and auto-fit to QR width
+    const sampleName = 'الضيف';
+    let nameSize = Math.max(14, Math.floor(qrSize * 0.18));
+    const maxTextWidth = Math.floor(qrSize * 1.05);
+    while (nameSize >= 14) {
+      ctx.font = `bold ${nameSize}px "${qrCfg.font}", Tahoma, Arial, sans-serif`;
+      if (ctx.measureText(sampleName).width <= maxTextWidth) break;
+      nameSize -= 2;
     }
+    const nameY = y + qrSize + Math.round(qrSize * 0.08) + labelSize + 6; // below label
+    ctx.font = `bold ${nameSize}px "${qrCfg.font}", Tahoma, Arial, sans-serif`;
+    ctx.fillText(sampleName, cx, nameY);
 
-    let textY = y + qrSize + Math.round(qrSize * 0.08);
-    const marginBottom = Math.round(qrSize * 0.04);
-    const maxY = canvas.height - marginBottom - fontSize;
-    if (textY > maxY) textY = maxY;
-
-    ctx.shadowColor = 'rgba(0,0,0,0.25)';
-    ctx.shadowBlur = 2;
-    ctx.shadowOffsetY = 1;
-    ctx.fillText(guestName, cx, textY);
     ctx.restore();
   }
 
@@ -366,31 +368,29 @@ export default function Admin() {
       const qrImg = await loadImage(qrDataUrl);
       ctx.drawImage(qrImg, x, y, qrSize, qrSize);
 
-      // Arabic name under QR (auto-fit)
-      const maxTextWidth = Math.floor(qrSize * 1.05);
-      let fontSize = Math.max(14, Math.floor(qrSize * 0.18));
+      // ✅ Arabic text under QR (two lines): "الضيفة المكرمة", then guest name
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.direction = 'rtl';
       ctx.fillStyle = '#000';
 
-      while (fontSize >= 14) {
-        ctx.font = `bold ${fontSize}px Tahoma, Arial, sans-serif`;
+      // line 1: label (slightly smaller)
+      let labelSize = Math.max(12, Math.floor(qrSize * 0.15));
+      ctx.font = `bold ${labelSize}px "${qrCfg.font}", Tahoma, Arial, sans-serif`;
+      const labelY = y + qrSize + Math.round(qrSize * 0.08);
+      ctx.fillText('الضيفة المكرمة', cx, labelY);
+
+      // line 2: guest name (auto-fit)
+      let nameSize = Math.max(14, Math.floor(qrSize * 0.18));
+      const maxTextWidth = Math.floor(qrSize * 1.05);
+      while (nameSize >= 14) {
+        ctx.font = `bold ${nameSize}px "${qrCfg.font}", Tahoma, Arial, sans-serif`;
         if (ctx.measureText(guestName).width <= maxTextWidth) break;
-        fontSize -= 2;
+        nameSize -= 2;
       }
-
-      let textY = y + qrSize + Math.round(qrSize * 0.08);
-      const marginBottom = Math.round(qrSize * 0.04);
-      const maxY = canvas.height - marginBottom - fontSize;
-      if (textY > maxY) textY = maxY;
-
-      ctx.save();
-      ctx.shadowColor = 'rgba(0,0,0,0.25)';
-      ctx.shadowBlur = 2;
-      ctx.shadowOffsetY = 1;
-      ctx.fillText(guestName, cx, textY);
-      ctx.restore();
+      const nameY = labelY + labelSize + 6;
+      ctx.font = `bold ${nameSize}px "${qrCfg.font}", Tahoma, Arial, sans-serif`;
+      ctx.fillText(guestName, cx, nameY);
 
       // download
       const outUrl = canvas.toDataURL('image/png');
@@ -521,6 +521,22 @@ export default function Admin() {
                         onChange={(e) => setQrCfg(v => ({ ...v, transparent: e.target.checked }))}
                       />
                       <label htmlFor="transparentBg" style={{ margin: 0 }}>Transparent QR background</label>
+                    </div>
+
+                    {/* ✅ NEW: Font dropdown */}
+                    <div>
+                      <label style={label}>Arabic Font</label>
+                      <select
+                        value={qrCfg.font}
+                        onChange={(e) => setQrCfg(v => ({ ...v, font: e.target.value }))}
+                        style={{ ...input, maxWidth: 260 }}
+                      >
+                        <option value="Tahoma">Tahoma</option>
+                        <option value="Cairo">Cairo</option>
+                        <option value="Amiri">Amiri</option>
+                        <option value="Arial">Arial</option>
+                        <option value="Noto Naskh Arabic">Noto Naskh Arabic</option>
+                      </select>
                     </div>
                   </div>
 
