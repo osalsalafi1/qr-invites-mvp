@@ -1,0 +1,5 @@
+:root { color-scheme: light dark; }
+html, body, #__next { height: 100%; margin: 0; padding: 0; }
+body { font-family: "Madani Arabic", Tahoma, Arial, sans-serif; background: #121212; color: #fff; }
+a { color: #BBDEFB; }
+button { cursor: pointer; }

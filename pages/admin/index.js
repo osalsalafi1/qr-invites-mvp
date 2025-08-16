@@ -5,7 +5,6 @@ import RequireRole from '@/components/RequireRole';
 import Papa from 'papaparse';
 import QRCode from 'qrcode';
 
-/** ---------------- Utilities ---------------- */
 function randCode(len = 8) {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let out = '';
@@ -13,57 +12,7 @@ function randCode(len = 8) {
   return out;
 }
 
-function csvSafe(s = '') {
-  const t = String(s ?? '');
-  return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
-}
-
-function loadImage(src) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = src;
-  });
-}
-
-/** Dynamically load pdf.js only if needed (for PDF design input) */
-let _pdfjsLib = null;
-async function ensurePdfJs() {
-  if (_pdfjsLib) return _pdfjsLib;
-  try {
-    _pdfjsLib = await import('pdfjs-dist/legacy/build/pdf');
-    // Use CDN worker to avoid bundler issues
-    _pdfjsLib.GlobalWorkerOptions.workerSrc =
-      `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${_pdfjsLib.version}/pdf.worker.min.js`;
-    return _pdfjsLib;
-  } catch (e) {
-    throw new Error('PDF preview requires pdfjs-dist. Install with: npm i pdfjs-dist');
-  }
-}
-
-/** Render first page of a PDF to a canvas with a target width (maintain aspect) */
-async function renderPdfToCanvas(pdfUrl, targetWidth = 520) {
-  const pdfjsLib = await ensurePdfJs();
-  const task = pdfjsLib.getDocument(pdfUrl);
-  const pdf = await task.promise;
-  const page = await pdf.getPage(1);
-
-  const vp1 = page.getViewport({ scale: 1 });
-  const scale = targetWidth / vp1.width;
-  const vp = page.getViewport({ scale });
-
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.floor(vp.width);
-  canvas.height = Math.floor(vp.height);
-  const ctx = canvas.getContext('2d');
-
-  await page.render({ canvasContext: ctx, viewport: vp }).promise;
-  return canvas;
-}
-
-/** ---------------- Theme (same palette as checker) ---------------- */
+// ---- Theme (same palette as checker) ----
 const BRAND = {
   bg: '#3E2723',
   card: '#4E342E',
@@ -105,7 +54,6 @@ const section = {
 };
 const h3 = { margin: 0, marginBottom: 12, fontSize: 18, fontWeight: 700 };
 
-/** ---------------- Component ---------------- */
 export default function Admin() {
   const [user, setUser] = useState(null);
 
@@ -128,75 +76,46 @@ export default function Admin() {
   // Invitation design (per event) in Supabase Storage
   const [designFile, setDesignFile] = useState(null);
   const [designUrl, setDesignUrl] = useState(null);
-  const [designKind, setDesignKind] = useState(null); // 'image' | 'pdf'
 
-  // QR cfg (independent)
-  const [qrCfg, setQrCfg] = useState({
-    xPct: 50,
-    yPct: 83,
-    sizePct: 24,                // % of image width
-    transparent: true,
-    colorDark: '#77758e',       // NEW: QR color (dark)
-    colorLight: '#0000',        // transparent by default
-  });
-
-  // Text cfg (independent)
-  const [textCfg, setTextCfg] = useState({
-    xPct: 50,
-    yPct: 92,                   // % of image height
-    sizePct: 6,                 // % of image width
-    color: '#77758e',
-    font: 'Madani Arabic',      // default to Madani Arabic (you should load it globally)
-  });
-
-  // Export format
-  const [exportFormat, setExportFormat] = useState('PNG'); // PNG | JPG | PDF
-
-  // Preview canvas
+  // Global QR placement config (per event) — percentages so it adapts to any design size
+  // xPct/yPct are the center point in %, sizePct is % of image width
+  // ✅ NEW: font (saved with the same config)
+  const [qrCfg, setQrCfg] = useState({ xPct: 50, yPct: 85, sizePct: 25, transparent: true, font: 'Tahoma' });
   const previewRef = useRef(null);
 
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
   const DESIGN_BUCKET = 'invitation-designs'; // Ensure this bucket exists (public)
 
-  /** ---------- Auth ---------- */
+  // Auth
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUser(data.user));
   }, []);
 
-  /** ---------- Load events on mount ---------- */
-  useEffect(() => {
-    fetchEvents();
-  }, []);
+  // Load events
+  useEffect(() => { fetchEvents(); }, []);
 
-  /** ---------- When switching events, load invites & design ---------- */
+  // When switching events, load invites/design/cfg
   useEffect(() => {
     if (selectedEventId) {
       loadInvites(selectedEventId);
       loadDesign(selectedEventId);
-      // restore per-event placement from localStorage
-      loadPlacement(selectedEventId);
+      loadQrCfg(selectedEventId);
     } else {
       setInvites([]);
       setDesignUrl(null);
-      setDesignKind(null);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedEventId]);
 
-  /** ---------- Re-render preview when inputs change ---------- */
-  useEffect(() => {
-    renderPreview();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [designUrl, designKind, qrCfg, textCfg]);
-
-  /** ---------- Data ---------- */
   async function fetchEvents() {
     const { data, error } = await supabase
       .from('events')
       .select('id,title,start_at,created_at')
       .order('created_at', { ascending: false });
 
-    if (error) return alert('Failed to load events: ' + error.message);
+    if (error) {
+      alert('Failed to load events: ' + error.message);
+      return;
+    }
     setEvents(data || []);
     if (!selectedEventId && data?.length) setSelectedEventId(data[0].id);
   }
@@ -208,64 +127,39 @@ export default function Admin() {
       .eq('event_id', eventId)
       .order('created_at', { ascending: true });
 
-    if (error) return alert('Failed to load guests: ' + error.message);
+    if (error) {
+      alert('Failed to load guests: ' + error.message);
+      return;
+    }
     setInvites(data || []);
   }
 
-  /** Find existing design: prefer PDF, then PNG/JPG */
   async function loadDesign(eventId) {
-    try {
-      const { data, error } = await supabase
-        .storage
-        .from(DESIGN_BUCKET)
-        .list(`${eventId}`, { limit: 50 });
-
-      if (error) throw error;
-
-      const files = data || [];
-      const pick = (name) => files.find(f => f.name.toLowerCase() === name);
-      const pdf  = pick('design.pdf');
-      const png  = pick('design.png');
-      const jpg  = pick('design.jpg') || pick('design.jpeg');
-
-      let chosen = pdf || png || jpg || files.find(f => /^design\./i.test(f.name));
-      if (!chosen) {
-        setDesignUrl(null);
-        setDesignKind(null);
-        return;
-      }
-      const { data: pub } = supabase
-        .storage
-        .from(DESIGN_BUCKET)
-        .getPublicUrl(`${eventId}/${chosen.name}`);
-
-      setDesignUrl(pub?.publicUrl || null);
-      setDesignKind(chosen.name.toLowerCase().endsWith('.pdf') ? 'pdf' : 'image');
-    } catch (e) {
-      setDesignUrl(null);
-      setDesignKind(null);
-    }
+    const { data } = await supabase
+      .storage
+      .from(DESIGN_BUCKET)
+      .getPublicUrl(`${eventId}/design.png`);
+    setDesignUrl(data?.publicUrl || null);
   }
 
-  /** Save & restore placement per event (localStorage) */
-  function loadPlacement(eventId) {
+  // Persist/restore QR config per event in localStorage
+  function loadQrCfg(eventId) {
     try {
       const raw = localStorage.getItem(`qr_cfg_${eventId}`);
-      if (raw) setQrCfg(v => ({ ...v, ...JSON.parse(raw) }));
-    } catch {}
-    try {
-      const raw2 = localStorage.getItem(`text_cfg_${eventId}`);
-      if (raw2) setTextCfg(v => ({ ...v, ...JSON.parse(raw2) }));
-    } catch {}
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          setQrCfg(prev => ({ ...prev, ...parsed }));
+        }
+      }
+    } catch { /* ignore */ }
   }
-  function savePlacement() {
+  function saveQrCfg() {
     if (!selectedEventId) return;
     localStorage.setItem(`qr_cfg_${selectedEventId}`, JSON.stringify(qrCfg));
-    localStorage.setItem(`text_cfg_${selectedEventId}`, JSON.stringify(textCfg));
-    alert('Placement saved for this event.');
+    alert('QR placement saved for this event.');
   }
 
-  /** ---------- Create event ---------- */
   async function createEvent() {
     if (!user) return alert('No user session');
     const { data, error } = await supabase
@@ -281,13 +175,13 @@ export default function Admin() {
       .single();
 
     if (error) return alert(error.message);
+
     alert('Event created');
     await fetchEvents();
     setSelectedEventId(data.id);
     setInvites([]);
   }
 
-  /** ---------- CSV upload ---------- */
   function handleCsv(e) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -325,23 +219,15 @@ export default function Admin() {
     alert(`Imported ${data?.length || 0} guests`);
   }
 
-  /** ---------- Upload design (image or PDF) ---------- */
   async function uploadDesign() {
-    if (!designFile) return alert('Choose a design file (.pdf, .png, .jpg) first.');
+    if (!designFile) return alert('Choose a design image first.');
     if (!selectedEventId) return alert('Select an event first.');
 
-    const ext0 = (designFile.name.split('.').pop() || '').toLowerCase();
-    const ext = ['pdf', 'png', 'jpg', 'jpeg'].includes(ext0) ? ext0 : 'png';
-    const path = `${selectedEventId}/design.${ext}`;
-    const contentType =
-      designFile.type ||
-      (ext === 'pdf' ? 'application/pdf' :
-       ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png');
-
+    const path = `${selectedEventId}/design.png`;
     const { error } = await supabase
       .storage
       .from(DESIGN_BUCKET)
-      .upload(path, designFile, { upsert: true, contentType });
+      .upload(path, designFile, { upsert: true, contentType: designFile.type || 'image/png' });
 
     if (error) return alert(error.message);
 
@@ -349,7 +235,6 @@ export default function Admin() {
     await loadDesign(selectedEventId);
   }
 
-  /** ---------- Export CSV ---------- */
   async function downloadCSV() {
     const head = 'guest_name,code,invite_url\n';
     const lines = (invites || []).map(
@@ -362,189 +247,173 @@ export default function Admin() {
     a.click();
   }
 
-  /** ---------- Preview renderer ---------- */
+  function csvSafe(s = '') {
+    const t = String(s ?? '');
+    return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+  }
+
+  // ---------- PREVIEW RENDER ----------
+  useEffect(() => {
+    renderPreview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [designUrl, qrCfg, selectedEventId]);
+
   async function renderPreview() {
     const canvas = previewRef.current;
     if (!canvas || !designUrl) return;
 
     const ctx = canvas.getContext('2d');
+    const img = await loadImage(designUrl);
 
-    // Base canvas from image or PDF (preview width ~520px)
-    let baseCanvas;
-    if (designKind === 'pdf') {
-      try {
-        baseCanvas = await renderPdfToCanvas(designUrl, 520);
-      } catch (err) {
-        // Show message once
-        console.error(err);
-        const w = 520, h = 320;
-        canvas.width = w; canvas.height = h;
-        ctx.fillStyle = '#111'; ctx.fillRect(0,0,w,h);
-        ctx.fillStyle = '#fff';
-        ctx.font = '14px sans-serif';
-        ctx.fillText('PDF preview requires pdfjs-dist', 12, 20);
-        ctx.fillText('Run: npm i pdfjs-dist', 12, 40);
-        return;
-      }
-    } else {
-      const img = await loadImage(designUrl);
-      const maxW = 520;
-      const scale = img.width > maxW ? maxW / img.width : 1;
-      baseCanvas = document.createElement('canvas');
-      baseCanvas.width = Math.round(img.width * scale);
-      baseCanvas.height = Math.round(img.height * scale);
-      baseCanvas.getContext('2d').drawImage(img, 0, 0, baseCanvas.width, baseCanvas.height);
-    }
+    // Scale down to preview width (keep aspect)
+    const maxW = 520;
+    const scale = img.width > maxW ? maxW / img.width : 1;
+    const w = Math.round(img.width * scale);
+    const h = Math.round(img.height * scale);
 
-    // Paint preview base
-    canvas.width = baseCanvas.width;
-    canvas.height = baseCanvas.height;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(baseCanvas, 0, 0);
+    canvas.width = w;
+    canvas.height = h;
 
-    const w = canvas.width;
-    const h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
 
-    // ---- Draw QR overlay ----
+    // compute QR rect from cfg
     const qrSize = Math.round((qrCfg.sizePct / 100) * w);
-    const qx = Math.round((qrCfg.xPct / 100) * w) - Math.floor(qrSize / 2);
-    const qy = Math.round((qrCfg.yPct / 100) * h) - Math.floor(qrSize / 2);
+    const cx = Math.round((qrCfg.xPct / 100) * w);
+    const cy = Math.round((qrCfg.yPct / 100) * h);
+    const x = cx - Math.floor(qrSize / 2);
+    const y = cy - Math.floor(qrSize / 2);
 
+    // light overlay box to show placement
+    ctx.save();
+    ctx.strokeStyle = '#00E676';
+    ctx.lineWidth = 2;
+    ctx.fillStyle = 'rgba(0, 230, 118, 0.15)';
+    ctx.fillRect(x, y, qrSize, qrSize);
+    ctx.strokeRect(x, y, qrSize, qrSize);
+
+    // preview QR (transparent if chosen)
     const previewQr = await QRCode.toDataURL('SAMPLE', {
       width: qrSize,
       margin: 0,
-      color: { dark: qrCfg.colorDark || '#000000', light: qrCfg.transparent ? '#0000' : '#FFFFFF' },
+      color: { dark: '#000000', light: qrCfg.transparent ? '#0000' : '#FFFFFF' },
     });
     const qrImg = await loadImage(previewQr);
-    ctx.drawImage(qrImg, qx, qy, qrSize, qrSize);
+    ctx.drawImage(qrImg, x, y, qrSize, qrSize);
 
-    // ---- Draw Guest name overlay ----
-    const tx = Math.round((textCfg.xPct / 100) * w);
-    const ty = Math.round((textCfg.yPct / 100) * h);
-    const fontPx = Math.max(10, Math.round((textCfg.sizePct / 100) * w));
-
-    ctx.save();
+    // ✅ Preview Arabic text under QR: line 1 (honorific), line 2 (name)
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.direction = 'rtl';
-    ctx.fillStyle = textCfg.color || '#000';
-    ctx.font = `bold ${fontPx}px "${textCfg.font}", Tahoma, Arial, sans-serif`;
-    ctx.fillText('الضيف', tx, ty);
+    ctx.fillStyle = '#000';
+
+    // label smaller
+    const label = 'الضيفة المكرمة';
+    let labelSize = Math.max(12, Math.floor(qrSize * 0.15));
+    ctx.font = `bold ${labelSize}px "${qrCfg.font}", Tahoma, Arial, sans-serif`;
+    ctx.fillText(label, cx, y + qrSize + Math.round(qrSize * 0.08));
+
+    // name bigger and auto-fit to QR width
+    const sampleName = 'الضيف';
+    let nameSize = Math.max(14, Math.floor(qrSize * 0.18));
+    const maxTextWidth = Math.floor(qrSize * 1.05);
+    while (nameSize >= 14) {
+      ctx.font = `bold ${nameSize}px "${qrCfg.font}", Tahoma, Arial, sans-serif`;
+      if (ctx.measureText(sampleName).width <= maxTextWidth) break;
+      nameSize -= 2;
+    }
+    const nameY = y + qrSize + Math.round(qrSize * 0.08) + labelSize + 6; // below label
+    ctx.font = `bold ${nameSize}px "${qrCfg.font}", Tahoma, Arial, sans-serif`;
+    ctx.fillText(sampleName, cx, nameY);
+
     ctx.restore();
   }
 
-  /** ---------- Generate invitations: PNG / JPG / PDF ---------- */
+  // ---------- GENERATE INVITATIONS ----------
   async function downloadQRCodes() {
-    if (!designUrl) return alert('Upload a design first.');
-
-    // Build a high-resolution base from the design:
-    // If PDF, render wide (e.g. 2400px) for quality; if image, use original size.
-    let baseCanvas;
-    if (designKind === 'pdf') {
-      try {
-        baseCanvas = await renderPdfToCanvas(designUrl, 2400); // hi-res render
-      } catch (e) {
-        return alert(e.message || 'PDF render failed. Ensure pdfjs-dist is installed.');
-      }
-    } else {
-      const img = await loadImage(designUrl);
-      baseCanvas = document.createElement('canvas');
-      baseCanvas.width = img.width;
-      baseCanvas.height = img.height;
-      baseCanvas.getContext('2d').drawImage(img, 0, 0);
+    if (!designUrl) {
+      return alert('Upload a design first, then set QR position/size.');
     }
 
-    const baseW = baseCanvas.width;
-    const baseH = baseCanvas.height;
+    const designImg = await loadImage(designUrl);
 
-    // Prepare jsPDF only if needed
-    let jsPDF = null;
-    if (exportFormat === 'PDF') {
-      try {
-        const mod = await import('jspdf');
-        jsPDF = mod.jsPDF;
-      } catch {
-        return alert('PDF export requires jspdf. Install with: npm i jspdf');
-      }
-    }
-
-    // Generate per invite
     for (const iv of invites || []) {
+      const qrUrl = `${baseUrl}/i/${iv.id}`;
+      const guestName = (iv.guest_name && String(iv.guest_name).trim()) || 'الضيف';
+
+      // Build QR with selected background (transparent or white)
+      const qrSizePx = Math.floor((qrCfg.sizePct / 100) * designImg.width);
+      const qrDataUrl = await QRCode.toDataURL(qrUrl, {
+        width: qrSizePx,
+        margin: 0, // remove extra white margin
+        color: { dark: '#000000', light: qrCfg.transparent ? '#0000' : '#FFFFFF' },
+      });
+
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
-      canvas.width = baseW;
-      canvas.height = baseH;
+      canvas.width = designImg.width;
+      canvas.height = designImg.height;
 
-      // Base design
-      ctx.drawImage(baseCanvas, 0, 0);
+      // draw design
+      ctx.drawImage(designImg, 0, 0);
 
-      // 1) QR (color + transparent bg)
-      const qrSizePx = Math.max(32, Math.floor((qrCfg.sizePct / 100) * baseW));
-      const qrDataUrl = await QRCode.toDataURL(`${baseUrl}/i/${iv.id}`, {
-        width: qrSizePx,
-        margin: 0,
-        color: {
-          dark: qrCfg.colorDark || '#000000',
-          light: qrCfg.transparent ? '#0000' : '#FFFFFF',
-        },
-      });
-      const qri = await loadImage(qrDataUrl);
-      const qcx = Math.floor((qrCfg.xPct / 100) * baseW);
-      const qcy = Math.floor((qrCfg.yPct / 100) * baseH);
-      const qx = qcx - Math.floor(qrSizePx / 2);
-      const qy = qcy - Math.floor(qrSizePx / 2);
-      ctx.drawImage(qri, qx, qy, qrSizePx, qrSizePx);
+      // compute QR rect from cfg (center point x/y + size)
+      const qrSize = qrSizePx;
+      const cx = Math.floor((qrCfg.xPct / 100) * designImg.width);
+      const cy = Math.floor((qrCfg.yPct / 100) * designImg.height);
+      const x = cx - Math.floor(qrSize / 2);
+      const y = cy - Math.floor(qrSize / 2);
 
-      // 2) Guest name (Arabic) — position/size/color independent from QR
-      const guestName = (iv.guest_name && String(iv.guest_name).trim()) || 'الضيف';
-      const tx = Math.floor((textCfg.xPct / 100) * baseW);
-      const ty = Math.floor((textCfg.yPct / 100) * baseH);
-      const fontPx = Math.max(12, Math.floor((textCfg.sizePct / 100) * baseW));
-      ctx.save();
+      // draw QR
+      const qrImg = await loadImage(qrDataUrl);
+      ctx.drawImage(qrImg, x, y, qrSize, qrSize);
+
+      // ✅ Arabic text under QR (two lines): "الضيفة المكرمة", then guest name
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.direction = 'rtl';
-      ctx.fillStyle = textCfg.color || '#000';
-      ctx.font = `bold ${fontPx}px "${textCfg.font}", Tahoma, Arial, sans-serif`;
-      ctx.fillText(guestName, tx, ty);
-      ctx.restore();
+      ctx.fillStyle = '#000';
 
-      // 3) Save in selected format
-      const safeName = guestName.replace(/[\\/:*?"<>|]/g, '_');
-      const baseFilename = `${safeName}_${iv.code || ''}`;
+      // line 1: label (slightly smaller)
+      let labelSize = Math.max(12, Math.floor(qrSize * 0.15));
+      ctx.font = `bold ${labelSize}px "${qrCfg.font}", Tahoma, Arial, sans-serif`;
+      const labelY = y + qrSize + Math.round(qrSize * 0.08);
+      ctx.fillText('الضيفة المكرمة', cx, labelY);
 
-      if (exportFormat === 'PNG') {
-        const url = canvas.toDataURL('image/png');
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${baseFilename}.png`;
-        a.click();
-      } else if (exportFormat === 'JPG') {
-        const url = canvas.toDataURL('image/jpeg', 0.92);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${baseFilename}.jpg`;
-        a.click();
-      } else {
-        // PDF
-        const pdf = new jsPDF({
-          orientation: baseW > baseH ? 'l' : 'p',
-          unit: 'px',
-          format: [baseW, baseH],
-          compress: true,
-        });
-        const jpegUrl = canvas.toDataURL('image/jpeg', 0.95);
-        pdf.addImage(jpegUrl, 'JPEG', 0, 0, baseW, baseH);
-        pdf.save(`${baseFilename}.pdf`);
+      // line 2: guest name (auto-fit)
+      let nameSize = Math.max(14, Math.floor(qrSize * 0.18));
+      const maxTextWidth = Math.floor(qrSize * 1.05);
+      while (nameSize >= 14) {
+        ctx.font = `bold ${nameSize}px "${qrCfg.font}", Tahoma, Arial, sans-serif`;
+        if (ctx.measureText(guestName).width <= maxTextWidth) break;
+        nameSize -= 2;
       }
+      const nameY = labelY + labelSize + 6;
+      ctx.font = `bold ${nameSize}px "${qrCfg.font}", Tahoma, Arial, sans-serif`;
+      ctx.fillText(guestName, cx, nameY);
 
-      // throttle downloads a bit
-      // eslint-disable-next-line no-await-in-loop
+      // download
+      const outUrl = canvas.toDataURL('image/png');
+      const a = document.createElement('a');
+      a.href = outUrl;
+      a.download = `${guestName.replace(/[\\/:*?"<>|]/g, '_')}_${iv.code || ''}.png`;
+      a.click();
+
       await new Promise((r) => setTimeout(r, 120));
     }
   }
 
-  /** ---------------- UI ---------------- */
+  function loadImage(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = src;
+    });
+  }
+
+  // ---------- UI ----------
   return (
     <RequireRole role="admin">
       <div style={{
@@ -561,7 +430,7 @@ export default function Admin() {
           </p>
         </header>
 
-        <div style={{ maxWidth: 1100, margin: '0 auto', display: 'grid', gap: 16, gridTemplateColumns: '1fr' }}>
+        <div style={{ maxWidth: 1000, margin: '0 auto', display: 'grid', gap: 16, gridTemplateColumns: '1fr' }}>
           {/* Row 1: Event picker + Create event */}
           <div style={{ display: 'grid', gap: 16, gridTemplateColumns: '1fr 1fr' }}>
             {/* Event Picker */}
@@ -569,7 +438,7 @@ export default function Admin() {
               <h3 style={h3}>Select event</h3>
               {events.length === 0 && <p style={{ color: BRAND.textMuted }}>No events yet. Create one on the right.</p>}
               {events.length > 0 && (
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                   <select
                     value={selectedEventId || ''}
                     onChange={(e) => setSelectedEventId(e.target.value || null)}
@@ -604,156 +473,94 @@ export default function Admin() {
             </section>
           </div>
 
-          {/* Row 2: Design + Preview + Controls */}
-          <div style={{ display: 'grid', gap: 16, gridTemplateColumns: '1.3fr 1fr' }}>
-            {/* Left: Preview + upload */}
+          {/* Row 2: Invitation Design + Upload guests */}
+          <div style={{ display: 'grid', gap: 16, gridTemplateColumns: '1fr 1fr' }}>
+            {/* Invitation Design + QR Placement */}
             <section style={section}>
-              <h3 style={h3}>Invitation Design & Preview</h3>
+              <h3 style={h3}>Invitation Design & QR Placement</h3>
 
-              <div style={{ marginBottom: 10 }}>
-                <canvas
-                  ref={previewRef}
-                  style={{ width: '100%', borderRadius: 12, border: `1px solid ${BRAND.border}`, background: '#000' }}
-                />
-              </div>
+              {designUrl ? (
+                <>
+                  <div style={{ marginBottom: 10 }}>
+                    <canvas ref={previewRef} style={{ width: '100%', borderRadius: 12, border: `1px solid ${BRAND.border}`, background: '#000' }} />
+                  </div>
 
-              <div style={{ display: 'grid', gap: 12, gridTemplateColumns: '1fr 1fr' }}>
-                <div style={{ gridColumn: '1 / span 2' }}>
-                  <label style={label}>Upload design (PDF / PNG / JPG)</label>
-                  <input
-                    type="file"
-                    accept="application/pdf,image/*"
-                    onChange={(e) => setDesignFile(e.target.files?.[0] || null)}
-                    style={{ ...input, padding: 8, background: 'transparent', border: '1px dashed ' + BRAND.inputBorder }}
-                  />
-                </div>
-                <div>
-                  <button style={btn(BRAND.accent)} onClick={uploadDesign}>Upload/Replace Design</button>
-                </div>
-                <div style={{ alignSelf: 'center', color: BRAND.textMuted, fontSize: 12 }}>
-                  Type: <b>{designKind || '—'}</b>{' '}
-                  {designUrl && (
-                    <> • Stored at: <code>invitation-designs/{selectedEventId || 'eventId'}/design.*</code></>
-                  )}
-                </div>
-              </div>
-            </section>
+                  <div style={{ display: 'grid', gap: 12, gridTemplateColumns: '1fr 1fr' }}>
+                    <div>
+                      <label style={label}>QR Horizontal (X%)</label>
+                      <input
+                        type="range" min="0" max="100" value={qrCfg.xPct}
+                        onChange={(e) => setQrCfg(v => ({ ...v, xPct: Number(e.target.value) }))}
+                        style={{ width: '100%' }}
+                      />
+                      <div style={{ fontSize: 12, color: BRAND.textMuted }}>{qrCfg.xPct}%</div>
+                    </div>
+                    <div>
+                      <label style={label}>QR Vertical (Y%)</label>
+                      <input
+                        type="range" min="0" max="100" value={qrCfg.yPct}
+                        onChange={(e) => setQrCfg(v => ({ ...v, yPct: Number(e.target.value) }))}
+                        style={{ width: '100%' }}
+                      />
+                      <div style={{ fontSize: 12, color: BRAND.textMuted }}>{qrCfg.yPct}%</div>
+                    </div>
+                    <div>
+                      <label style={label}>QR Size (% of image width)</label>
+                      <input
+                        type="range" min="5" max="50" value={qrCfg.sizePct}
+                        onChange={(e) => setQrCfg(v => ({ ...v, sizePct: Number(e.target.value) }))}
+                        style={{ width: '100%' }}
+                      />
+                      <div style={{ fontSize: 12, color: BRAND.textMuted }}>{qrCfg.sizePct}%</div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <input
+                        id="transparentBg"
+                        type="checkbox"
+                        checked={qrCfg.transparent}
+                        onChange={(e) => setQrCfg(v => ({ ...v, transparent: e.target.checked }))}
+                      />
+                      <label htmlFor="transparentBg" style={{ margin: 0 }}>Transparent QR background</label>
+                    </div>
 
-            {/* Right: Controls */}
-            <section style={section}>
-              <h3 style={h3}>Placement & Style</h3>
-
-              {/* QR Controls */}
-              <div style={{ marginBottom: 14, paddingBottom: 12, borderBottom: `1px dashed ${BRAND.border}` }}>
-                <h4 style={{ margin: 0, marginBottom: 10 }}>QR Code</h4>
-                <div style={{ display: 'grid', gap: 10, gridTemplateColumns: '1fr 1fr' }}>
-                  <div>
-                    <label style={label}>Position X (%)</label>
-                    <input type="range" min="0" max="100" value={qrCfg.xPct}
-                      onChange={(e) => setQrCfg(v => ({ ...v, xPct: Number(e.target.value) }))}
-                      style={{ width: '100%' }} />
-                    <div style={{ fontSize: 12, color: BRAND.textMuted }}>{qrCfg.xPct}%</div>
-                  </div>
-                  <div>
-                    <label style={label}>Position Y (%)</label>
-                    <input type="range" min="0" max="100" value={qrCfg.yPct}
-                      onChange={(e) => setQrCfg(v => ({ ...v, yPct: Number(e.target.value) }))}
-                      style={{ width: '100%' }} />
-                    <div style={{ fontSize: 12, color: BRAND.textMuted }}>{qrCfg.yPct}%</div>
-                  </div>
-                  <div>
-                    <label style={label}>Size (% of width)</label>
-                    <input type="range" min="5" max="50" value={qrCfg.sizePct}
-                      onChange={(e) => setQrCfg(v => ({ ...v, sizePct: Number(e.target.value) }))}
-                      style={{ width: '100%' }} />
-                    <div style={{ fontSize: 12, color: BRAND.textMuted }}>{qrCfg.sizePct}%</div>
-                  </div>
-                  <div>
-                    <label style={label}>QR Color</label>
-                    <input type="color" value={qrCfg.colorDark}
-                      onChange={(e) => setQrCfg(v => ({ ...v, colorDark: e.target.value }))}
-                      style={{ width: 60, height: 36, border: 'none', background: 'transparent', cursor: 'pointer' }} />
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <input
-                      id="transparentBg"
-                      type="checkbox"
-                      checked={qrCfg.transparent}
-                      onChange={(e) => setQrCfg(v => ({ ...v, transparent: e.target.checked, colorLight: e.target.checked ? '#0000' : '#FFFFFF' }))}
-                    />
-                    <label htmlFor="transparentBg" style={{ margin: 0 }}>Transparent QR background</label>
-                  </div>
-                </div>
-              </div>
-
-              {/* Text Controls */}
-              <div>
-                <h4 style={{ margin: 0, marginBottom: 10 }}>Guest Name Text</h4>
-                <div style={{ display: 'grid', gap: 10, gridTemplateColumns: '1fr 1fr' }}>
-                  <div>
-                    <label style={label}>Position X (%)</label>
-                    <input type="range" min="0" max="100" value={textCfg.xPct}
-                      onChange={(e) => setTextCfg(v => ({ ...v, xPct: Number(e.target.value) }))}
-                      style={{ width: '100%' }} />
-                    <div style={{ fontSize: 12, color: BRAND.textMuted }}>{textCfg.xPct}%</div>
-                  </div>
-                  <div>
-                    <label style={label}>Position Y (%)</label>
-                    <input type="range" min="0" max="100" value={textCfg.yPct}
-                      onChange={(e) => setTextCfg(v => ({ ...v, yPct: Number(e.target.value) }))}
-                      style={{ width: '100%' }} />
-                    <div style={{ fontSize: 12, color: BRAND.textMuted }}>{textCfg.yPct}%</div>
-                  </div>
-                  <div>
-                    <label style={label}>Font Size (% of width)</label>
-                    <input type="range" min="2" max="15" value={textCfg.sizePct}
-                      onChange={(e) => setTextCfg(v => ({ ...v, sizePct: Number(e.target.value) }))}
-                      style={{ width: '100%' }} />
-                    <div style={{ fontSize: 12, color: BRAND.textMuted }}>{textCfg.sizePct}%</div>
-                  </div>
-                  <div>
-                    <label style={label}>Text Color</label>
-                    <input type="color" value={textCfg.color}
-                      onChange={(e) => setTextCfg(v => ({ ...v, color: e.target.value }))}
-                      style={{ width: 60, height: 36, border: 'none', background: 'transparent', cursor: 'pointer' }} />
-                  </div>
-                  <div style={{ gridColumn: '1 / span 2' }}>
-                    <label style={label}>Font Family</label>
-                    <input
-                      value={textCfg.font}
-                      onChange={(e) => setTextCfg(v => ({ ...v, font: e.target.value }))}
-                      placeholder='Madani Arabic'
-                      style={{ ...input }}
-                    />
-                    <div style={{ color: BRAND.textMuted, fontSize: 12, marginTop: 6 }}>
-                      Default is <b>Madani Arabic</b>. Make sure the font is loaded globally (e.g. via _document.js). Fallback: Tahoma, Arial.
+                    {/* ✅ NEW: Font dropdown */}
+                    <div>
+                      <label style={label}>Arabic Font</label>
+                      <select
+                        value={qrCfg.font}
+                        onChange={(e) => setQrCfg(v => ({ ...v, font: e.target.value }))}
+                        style={{ ...input, maxWidth: 260 }}
+                      >
+                        <option value="Tahoma">Tahoma</option>
+                        <option value="Cairo">Cairo</option>
+                        <option value="Amiri">Amiri</option>
+                        <option value="Arial">Arial</option>
+                        <option value="Noto Naskh Arabic">Noto Naskh Arabic</option>
+                      </select>
                     </div>
                   </div>
-                </div>
-              </div>
 
-              {/* Save placement + Export format */}
-              <div style={{ marginTop: 14, display: 'grid', gap: 10, gridTemplateColumns: '1fr 1fr' }}>
-                <button style={btn(BRAND.accent)} onClick={savePlacement}>Save placement</button>
-                <div>
-                  <label style={{ ...label, marginBottom: 4 }}>Export format</label>
-                  <select
-                    value={exportFormat}
-                    onChange={(e) => setExportFormat(e.target.value)}
-                    style={{ ...input }}
-                  >
-                    <option value="PNG">PNG</option>
-                    <option value="JPG">JPG</option>
-                    <option value="PDF">PDF</option>
-                  </select>
-                </div>
-              </div>
+                  <div style={{ height: 12 }} />
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                    <button style={btn(BRAND.accent)} onClick={saveQrCfg}>Save QR placement</button>
+                    <button style={btn()} onClick={renderPreview}>Preview again</button>
+                  </div>
+                </>
+              ) : (
+                <p style={{ color: BRAND.textMuted }}>Upload a design to place the QR.</p>
+              )}
+
+              <div style={{ height: 12 }} />
+              <input type="file" accept="image/*" onChange={(e) => setDesignFile(e.target.files?.[0] || null)}
+                     style={{ ...input, padding: 8, background: 'transparent', border: '1px dashed ' + BRAND.inputBorder }} />
+              <div style={{ height: 10 }} />
+              <button style={btn(BRAND.accent)} onClick={uploadDesign}>Upload/Replace Design</button>
+              <p style={{ color: BRAND.textMuted, fontSize: 12, marginTop: 8 }}>
+                Stored at: <code>invitation-designs/{selectedEventId || 'eventId'}/design.png</code>
+              </p>
             </section>
-          </div>
 
-          {/* Row 3: Import guests + Export + Invites list */}
-          <div style={{ display: 'grid', gap: 16, gridTemplateColumns: '1fr 1fr' }}>
-            {/* Import guests */}
+            {/* Upload guests */}
             <section style={section}>
               <h3 style={h3}>Upload guests (CSV)</h3>
               <p style={{ color: BRAND.textMuted, marginTop: 0 }}>
@@ -766,8 +573,11 @@ export default function Admin() {
                 Import guests
               </button>
             </section>
+          </div>
 
-            {/* Export & generate */}
+          {/* Row 3: Export + Invites list */}
+          <div style={{ display: 'grid', gap: 16, gridTemplateColumns: '1fr 1fr' }}>
+            {/* Export */}
             <section style={section}>
               <h3 style={h3}>Export</h3>
               <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -775,46 +585,46 @@ export default function Admin() {
                   Download CSV (links)
                 </button>
                 <button style={btn()} onClick={downloadQRCodes} disabled={!invites.length || !designUrl}>
-                  Generate Invitations ({exportFormat})
+                  Generate Invitations (with QR + Arabic name)
                 </button>
               </div>
             </section>
-          </div>
 
-          {/* Invites list */}
-          <section style={section}>
-            <h3 style={h3}>Invites</h3>
-            {!selectedEventId && <p style={{ color: BRAND.textMuted }}>Select an event to view guests.</p>}
-            {selectedEventId && invites.length === 0 && <p style={{ color: BRAND.textMuted }}>— no guests —</p>}
-            {selectedEventId && invites.length > 0 && (
-              <div style={{ maxHeight: 320, overflow: 'auto', border: `1px solid ${BRAND.border}`, borderRadius: 12 }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', background: BRAND.surface }}>
-                  <thead>
-                    <tr style={{ background: BRAND.bg }}>
-                      <th style={thStyle()}>Name</th>
-                      <th style={thStyle()}>Code</th>
-                      <th style={thStyle()}>Status</th>
-                      <th style={thStyle()}>Link</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {invites.map((iv) => (
-                      <tr key={iv.id} style={{ borderBottom: `1px solid ${BRAND.border}` }}>
-                        <td style={tdStyle()}>{iv.guest_name}</td>
-                        <td style={tdStyle()}>{iv.code}</td>
-                        <td style={tdStyle()}>{iv.status}</td>
-                        <td style={tdStyle()}>
-                          <a href={`${baseUrl}/i/${iv.id}`} target="_blank" rel="noreferrer" style={{ color: '#BBDEFB' }}>
-                            open
-                          </a>
-                        </td>
+            {/* Invites list */}
+            <section style={section}>
+              <h3 style={h3}>Invites</h3>
+              {!selectedEventId && <p style={{ color: BRAND.textMuted }}>Select an event to view guests.</p>}
+              {selectedEventId && invites.length === 0 && <p style={{ color: BRAND.textMuted }}>— no guests —</p>}
+              {selectedEventId && invites.length > 0 && (
+                <div style={{ maxHeight: 320, overflow: 'auto', border: `1px solid ${BRAND.border}`, borderRadius: 12 }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', background: BRAND.surface }}>
+                    <thead>
+                      <tr style={{ background: BRAND.bg }}>
+                        <th style={thStyle()}>Name</th>
+                        <th style={thStyle()}>Code</th>
+                        <th style={thStyle()}>Status</th>
+                        <th style={thStyle()}>Link</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
+                    </thead>
+                    <tbody>
+                      {invites.map((iv) => (
+                        <tr key={iv.id} style={{ borderBottom: `1px solid ${BRAND.border}` }}>
+                          <td style={tdStyle()}>{iv.guest_name}</td>
+                          <td style={tdStyle()}>{iv.code}</td>
+                          <td style={tdStyle()}>{iv.status}</td>
+                          <td style={tdStyle()}>
+                            <a href={`${baseUrl}/i/${iv.id}`} target="_blank" rel="noreferrer" style={{ color: '#BBDEFB' }}>
+                              open
+                            </a>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          </div>
         </div>
       </div>
     </RequireRole>
