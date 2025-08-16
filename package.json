@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.3",
-    "html5-qrcode": "^2.3.10",
+    "html5-qrcode": "^2.3.8",
     "jspdf": "^2.5.1",
     "next": "^14.2.5",
     "papaparse": "^5.4.1",
